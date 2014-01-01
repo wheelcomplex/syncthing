@@ -14,12 +14,12 @@ acquire locks, but document what locks they require.
 import (
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"sync"
 	"time"
 
 	"github.com/calmh/syncthing/buffers"
+	"github.com/calmh/syncthing/fdcache"
 	"github.com/calmh/syncthing/protocol"
 )
 
@@ -221,7 +221,7 @@ func (m *Model) Request(nodeID, name string, offset uint64, size uint32, hash []
 		debugf("NET REQ(in): %s: %q o=%d s=%d h=%x", nodeID, name, offset, size, hash)
 	}
 	fn := path.Join(m.dir, name)
-	fd, err := os.Open(fn) // XXX: Inefficient, should cache fd?
+	fd, err := fdcache.Open(fn)
 	if err != nil {
 		return nil, err
 	}
