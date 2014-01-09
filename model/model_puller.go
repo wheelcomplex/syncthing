@@ -28,12 +28,38 @@ import (
 	"github.com/calmh/syncthing/protocol"
 )
 
+func (m *Model) pullDir(name string) error {
+	m.fieldLock.RLock()
+	globalFile, ok := m.global[name]
+	m.fieldLock.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	dirname := path.Join(m.dir, name)
+	fi, err := os.Stat(dirname)
+	if err != nil {
+		return err
+	}
+
+	if uint32(fi.Mode())&0xfff != globalFile.Flags&0xfff {
+		os.Chmod(dirname, os.FileMode(globalFile.Flags&0xfff))
+	}
+	if fi.ModTime().Unix() != globalFile.Modified {
+		t := time.Unix(globalFile.Modified, 0)
+		os.Chtimes(dirname, t, t)
+	}
+
+	return nil
+}
+
 func (m *Model) pullFile(name string) error {
-	m.RLock()
+	m.fieldLock.RLock()
 	var localFile = m.local[name]
 	var globalFile = m.global[name]
 	var nodeIDs = m.whoHas(name)
-	m.RUnlock()
+	m.fieldLock.RUnlock()
 
 	if len(nodeIDs) == 0 {
 		return fmt.Errorf("%s: no connected nodes with file available", name)
@@ -139,21 +165,34 @@ func (m *Model) puller() {
 	for {
 		time.Sleep(time.Second)
 
-		var ns []string
-		m.RLock()
-		for n := range m.need {
-			ns = append(ns, n)
-		}
-		m.RUnlock()
+		m.walkLock.Lock()
 
-		if len(ns) == 0 {
+		var needFiles []string
+		var needDirs []string
+		m.fieldLock.RLock()
+		for n := range m.need {
+			if m.global[n].Flags&protocol.FlagDirectory == 0 {
+				needFiles = append(needFiles, n)
+			} else {
+				needDirs = append(needDirs, n)
+			}
+		}
+		m.fieldLock.RUnlock()
+
+		if len(needFiles)+len(needDirs) == 0 {
+			m.walkLock.Unlock()
 			continue
 		}
 
 		var limiter = make(chan bool, m.parallellFiles)
 		var allDone sync.WaitGroup
 
-		for _, n := range ns {
+		for _, n := range needFiles {
+			dir, _ := path.Split(n)
+			if len(dir) > 0 {
+				needDirs = append(needDirs, dir)
+			}
+
 			limiter <- true
 			allDone.Add(1)
 
@@ -163,9 +202,9 @@ func (m *Model) puller() {
 					<-limiter
 				}()
 
-				m.RLock()
+				m.fieldLock.RLock()
 				f, ok := m.global[n]
-				m.RUnlock()
+				m.fieldLock.RUnlock()
 
 				if !ok {
 					return
@@ -176,7 +215,10 @@ func (m *Model) puller() {
 					if m.trace["file"] {
 						log.Printf("FILE: Pull %q", n)
 					}
-					err = m.pullFile(n)
+					err := m.pullFile(n)
+					if err != nil && m.trace["file"] {
+						log.Printf("FILE: %q: %v", n, err)
+					}
 				} else {
 					if m.trace["file"] {
 						log.Printf("FILE: Remove %q", n)
@@ -185,14 +227,27 @@ func (m *Model) puller() {
 					_ = os.Remove(path.Join(m.dir, n))
 				}
 				if err == nil {
-					m.Lock()
+					m.fieldLock.Lock()
 					m.updateLocal(f)
-					m.Unlock()
+					m.fieldLock.Unlock()
 				}
 			}(n)
 		}
 
 		allDone.Wait()
+
+		updatedDir := make(map[string]bool)
+		for _, n := range needDirs {
+			if !updatedDir[n] {
+				if m.trace["file"] {
+					log.Printf("FILE: Update dir %q", n)
+				}
+				m.pullDir(n)
+				updatedDir[n] = true
+			}
+		}
+
+		m.walkLock.Unlock()
 	}
 }
 

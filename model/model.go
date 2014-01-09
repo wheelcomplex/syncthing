@@ -28,31 +28,34 @@ import (
 )
 
 type Model struct {
-	sync.RWMutex
+	fieldLock sync.RWMutex // protects all model fields
+	walkLock  sync.Mutex   // exclusion between pulling and walking for updates
+
 	dir string
 
-	global  map[string]File // the latest version of each file as it exists in the cluster
-	local   map[string]File // the files we currently have locally on disk
-	remote  map[string]map[string]File
-	need    map[string]bool // the files we need to update
-	nodes   map[string]*protocol.Connection
-	rawConn map[string]io.ReadWriteCloser
+	global map[string]File            // the latest version of each file as it exists in the cluster
+	local  map[string]File            // the files we currently have locally on disk
+	remote map[string]map[string]File // the remote indexes
+	need   map[string]bool            // the files we need to update
+
+	nodes   map[string]*protocol.Connection // the protocol connection per node
+	rawConn map[string]io.ReadWriteCloser   // the underlying connection object per node
 
 	updatedLocal int64 // timestamp of last update to local
 	updateGlobal int64 // timestamp of last update to remote
 
-	lastIdxBcast        time.Time
-	lastIdxBcastRequest time.Time
+	lastIdxBcast        time.Time // last time we sent an index
+	lastIdxBcastRequest time.Time // last time someone wanted to send and index
 
-	rwRunning      bool
-	parallellFiles int
-	paralllelReqs  int
-	delete         bool
+	rwRunning      bool // we have started r/w processing
+	delete         bool // we are allowed to delete files
+	parallellFiles int  // maximum number of files to pull in parallell
+	paralllelReqs  int  // maximum number of parallell requests per file
 
-	trace map[string]bool
+	trace map[string]bool // the set of enabled trace (debugging) categories
 
-	fileLastChanged   map[string]time.Time
-	fileWasSuppressed map[string]int
+	fileLastChanged   map[string]time.Time // last time we updated a file in the index
+	fileWasSuppressed map[string]int       // how many update rounds we have suppressed changes to the file
 }
 
 const (
@@ -92,8 +95,8 @@ func NewModel(dir string) *Model {
 
 // Trace enables trace logging of the given facility. This is a debugging function; grep for m.trace.
 func (m *Model) Trace(t string) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 	m.trace[t] = true
 }
 
@@ -101,8 +104,8 @@ func (m *Model) Trace(t string) {
 // read/write mode the model will attempt to keep in sync with the cluster by
 // pulling needed files from peer nodes.
 func (m *Model) StartRW(del bool, pfiles, preqs int) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 
 	if m.rwRunning {
 		panic("starting started model")
@@ -120,8 +123,8 @@ func (m *Model) StartRW(del bool, pfiles, preqs int) {
 // Generation returns an opaque integer that is guaranteed to increment on
 // every change to the local repository or global model.
 func (m *Model) Generation() int64 {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 
 	return m.updatedLocal + m.updateGlobal
 }
@@ -137,8 +140,8 @@ func (m *Model) ConnectionStats() map[string]ConnectionInfo {
 		RemoteAddr() net.Addr
 	}
 
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 
 	var res = make(map[string]ConnectionInfo)
 	for node, conn := range m.nodes {
@@ -156,8 +159,8 @@ func (m *Model) ConnectionStats() map[string]ConnectionInfo {
 // LocalSize returns the number of files, deleted files and total bytes for all
 // files in the global model.
 func (m *Model) GlobalSize() (files, deleted, bytes int) {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 
 	for _, f := range m.global {
 		if f.Flags&protocol.FlagDeleted == 0 {
@@ -173,8 +176,8 @@ func (m *Model) GlobalSize() (files, deleted, bytes int) {
 // LocalSize returns the number of files, deleted files and total bytes for all
 // files in the local repository.
 func (m *Model) LocalSize() (files, deleted, bytes int) {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 
 	for _, f := range m.local {
 		if f.Flags&protocol.FlagDeleted == 0 {
@@ -190,8 +193,8 @@ func (m *Model) LocalSize() (files, deleted, bytes int) {
 // InSyncSize returns the number and total byte size of the local files that
 // are in sync with the global model.
 func (m *Model) InSyncSize() (files, bytes int) {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 
 	for n, f := range m.local {
 		if gf, ok := m.global[n]; ok && f.Equals(gf) {
@@ -204,8 +207,8 @@ func (m *Model) InSyncSize() (files, bytes int) {
 
 // NeedFiles returns the list of currently needed files and the total size.
 func (m *Model) NeedFiles() (files []File, bytes int) {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 
 	for n := range m.need {
 		f := m.global[n]
@@ -218,8 +221,8 @@ func (m *Model) NeedFiles() (files []File, bytes int) {
 // Index is called when a new node is connected and we receive their full index.
 // Implements the protocol.Model interface.
 func (m *Model) Index(nodeID string, fs []protocol.FileInfo) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 
 	if m.trace["net"] {
 		log.Printf("NET IDX(in): %s: %d files", nodeID, len(fs))
@@ -244,8 +247,8 @@ func (m *Model) Index(nodeID string, fs []protocol.FileInfo) {
 // IndexUpdate is called for incremental updates to connected nodes' indexes.
 // Implements the protocol.Model interface.
 func (m *Model) IndexUpdate(nodeID string, fs []protocol.FileInfo) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 
 	if m.trace["net"] {
 		log.Printf("NET IDXUP(in): %s: %d files", nodeID, len(fs))
@@ -274,8 +277,8 @@ func (m *Model) IndexUpdate(nodeID string, fs []protocol.FileInfo) {
 // Close removes the peer from the model and closes the underlyign connection if possible.
 // Implements the protocol.Model interface.
 func (m *Model) Close(node string, err error) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 
 	conn, ok := m.rawConn[node]
 	if ok {
@@ -294,10 +297,10 @@ func (m *Model) Close(node string, err error) {
 // Implements the protocol.Model interface.
 func (m *Model) Request(nodeID, name string, offset uint64, size uint32, hash []byte) ([]byte, error) {
 	// Verify that the requested file exists in the local and global model.
-	m.RLock()
+	m.fieldLock.RLock()
 	lf, localOk := m.local[name]
 	_, globalOk := m.global[name]
-	m.RUnlock()
+	m.fieldLock.RUnlock()
 	if !localOk || !globalOk {
 		log.Printf("SECURITY (nonexistent file) REQ(in): %s: %q o=%d s=%d h=%x", nodeID, name, offset, size, hash)
 		return nil, ErrNoSuchFile
@@ -328,8 +331,8 @@ func (m *Model) Request(nodeID, name string, offset uint64, size uint32, hash []
 // ReplaceLocal replaces the local repository index with the given list of files.
 // Change suppression is applied to files changing too often.
 func (m *Model) ReplaceLocal(fs []File) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 
 	var updated bool
 	var newLocal = make(map[string]File)
@@ -362,8 +365,8 @@ func (m *Model) ReplaceLocal(fs []File) {
 // in protocol data types. Does not track deletes, should only be used to seed
 // the local index from a cache file at startup.
 func (m *Model) SeedLocal(fs []protocol.FileInfo) {
-	m.Lock()
-	defer m.Unlock()
+	m.fieldLock.Lock()
+	defer m.fieldLock.Unlock()
 
 	m.local = make(map[string]File)
 	for _, f := range fs {
@@ -376,16 +379,16 @@ func (m *Model) SeedLocal(fs []protocol.FileInfo) {
 
 // ConnectedTo returns true if we are connected to the named node.
 func (m *Model) ConnectedTo(nodeID string) bool {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 	_, ok := m.nodes[nodeID]
 	return ok
 }
 
 // ProtocolIndex returns the current local index in protocol data types.
 func (m *Model) ProtocolIndex() []protocol.FileInfo {
-	m.RLock()
-	defer m.RUnlock()
+	m.fieldLock.RLock()
+	defer m.fieldLock.RUnlock()
 	return m.protocolIndex()
 }
 
@@ -400,14 +403,14 @@ func (m *Model) RepoID() string {
 func (m *Model) AddConnection(conn io.ReadWriteCloser, nodeID string) {
 	node := protocol.NewConnection(nodeID, conn, conn, m)
 
-	m.Lock()
+	m.fieldLock.Lock()
 	m.nodes[nodeID] = node
 	m.rawConn[nodeID] = conn
-	m.Unlock()
+	m.fieldLock.Unlock()
 
-	m.RLock()
+	m.fieldLock.RLock()
 	idx := m.protocolIndex()
-	m.RUnlock()
+	m.fieldLock.RUnlock()
 
 	go func() {
 		node.Index(idx)
@@ -455,9 +458,9 @@ func (m *Model) protocolIndex() []protocol.FileInfo {
 }
 
 func (m *Model) requestGlobal(nodeID, name string, offset uint64, size uint32, hash []byte) ([]byte, error) {
-	m.RLock()
+	m.fieldLock.RLock()
 	nc, ok := m.nodes[nodeID]
-	m.RUnlock()
+	m.fieldLock.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("requestGlobal: no such node: %s", nodeID)
 	}
@@ -471,14 +474,14 @@ func (m *Model) requestGlobal(nodeID, name string, offset uint64, size uint32, h
 
 func (m *Model) broadcastIndexLoop() {
 	for {
-		m.RLock()
+		m.fieldLock.RLock()
 		bcastRequested := m.lastIdxBcastRequest.After(m.lastIdxBcast)
 		holdtimeExceeded := time.Since(m.lastIdxBcastRequest) > idxBcastHoldtime
-		m.RUnlock()
+		m.fieldLock.RUnlock()
 
 		maxDelayExceeded := time.Since(m.lastIdxBcast) > idxBcastMaxDelay
 		if bcastRequested && (holdtimeExceeded || maxDelayExceeded) {
-			m.Lock()
+			m.fieldLock.Lock()
 			var indexWg sync.WaitGroup
 			indexWg.Add(len(m.nodes))
 			idx := m.protocolIndex()
@@ -493,7 +496,7 @@ func (m *Model) broadcastIndexLoop() {
 					indexWg.Done()
 				}()
 			}
-			m.Unlock()
+			m.fieldLock.Unlock()
 			indexWg.Wait()
 		}
 		time.Sleep(idxBcastHoldtime)

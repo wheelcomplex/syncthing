@@ -39,6 +39,12 @@ var testDataExpected = map[string]File{
 		Modified: 0,
 		Blocks:   []Block{{Offset: 0x0, Length: 0xa, Hash: []uint8{0x2f, 0x72, 0xcc, 0x11, 0xa6, 0xfc, 0xd0, 0x27, 0x1e, 0xce, 0xf8, 0xc6, 0x10, 0x56, 0xee, 0x1e, 0xb1, 0x24, 0x3b, 0xe3, 0x80, 0x5b, 0xf9, 0xa9, 0xdf, 0x98, 0xf9, 0x2f, 0x76, 0x36, 0xb0, 0x5c}}},
 	},
+	"baz": File{
+		Name:     "baz",
+		Flags:    protocol.FlagDirectory,
+		Modified: 0,
+		Blocks:   nil,
+	},
 	"baz/quux": File{
 		Name:     "baz/quux",
 		Flags:    0,
@@ -51,7 +57,7 @@ func init() {
 	// Fix expected test data to match reality
 	for n, f := range testDataExpected {
 		fi, _ := os.Stat("testdata/" + n)
-		f.Flags = uint32(fi.Mode())
+		f.Flags = f.Flags&^0xfff | uint32(fi.Mode()&0xfff)
 		f.Modified = fi.ModTime().Unix()
 		testDataExpected[n] = f
 	}
@@ -67,34 +73,22 @@ func TestUpdateLocal(t *testing.T) {
 	}
 
 	if l1, l2 := len(m.local), len(testDataExpected); l1 != l2 {
-		t.Fatalf("Model len(local) incorrect, %d != %d", l1, l2)
-	}
-	if l1, l2 := len(m.global), len(testDataExpected); l1 != l2 {
-		t.Fatalf("Model len(global) incorrect, %d != %d", l1, l2)
-	}
-	for name, file := range testDataExpected {
-		if f, ok := m.local[name]; ok {
-			if !reflect.DeepEqual(f, file) {
-				t.Errorf("Incorrect local\n%v !=\n%v\nfor file %q", f, file, name)
+		t.Errorf("Model len(local) incorrect, %d != %d", l1, l2)
+	} else {
+		for i := range testDataExpected {
+			if !reflect.DeepEqual(testDataExpected[i], m.local[i]) {
+				t.Errorf("Local file %d mismatch\n  E: %+v\n  A: %+v\n", i, testDataExpected[i], m.local[i])
 			}
-		} else {
-			t.Errorf("Missing file %q in local table", name)
-		}
-		if f, ok := m.global[name]; ok {
-			if !reflect.DeepEqual(f, file) {
-				t.Errorf("Incorrect global\n%v !=\n%v\nfor file %q", f, file, name)
-			}
-		} else {
-			t.Errorf("Missing file %q in global table", name)
 		}
 	}
 
-	for _, f := range fs {
-		if hf, ok := m.local[f.Name]; !ok || hf.Modified != f.Modified {
-			t.Fatalf("Incorrect local for %q", f.Name)
-		}
-		if cf, ok := m.global[f.Name]; !ok || cf.Modified != f.Modified {
-			t.Fatalf("Incorrect global for %q", f.Name)
+	if l1, l2 := len(m.global), len(testDataExpected); l1 != l2 {
+		t.Errorf("Model len(global) incorrect, %d != %d", l1, l2)
+	} else {
+		for i := range testDataExpected {
+			if !reflect.DeepEqual(testDataExpected[i], m.global[i]) {
+				t.Errorf("Local file %d mismatch\n  E: %+v\n  A: %+v\n", i, testDataExpected[i], m.global[i])
+			}
 		}
 	}
 }

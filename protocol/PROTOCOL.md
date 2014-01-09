@@ -114,7 +114,7 @@ The flags field is made up of the following single bit flags:
      0                   1                   2                   3
      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    |              Reserved             |I|D|   Unix Perm. & Mode   |
+    |              Reserved           |R|I|D|   Unix Perm. & Mode   |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
  - The lower 12 bits hold the common Unix permission and mode bits.
@@ -128,7 +128,10 @@ The flags field is made up of the following single bit flags:
    synchronization. A peer may set this bit to indicate that it can
    temporarily not serve data for the file.
 
- - Bit 0 through 17 are reserved for future use and shall be set to
+ - Bit 17 ("R") is set when the file record represents a directory.
+   The block list contains zero blocks.
+
+ - Bit 0 through 16 are reserved for future use and shall be set to
    zero.
 
 ### Request (Type = 2)

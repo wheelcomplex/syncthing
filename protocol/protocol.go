@@ -21,8 +21,9 @@ const (
 )
 
 const (
-	FlagDeleted = 1 << 12
-	FlagInvalid = 1 << 13
+	FlagDeleted   = 1 << 12
+	FlagInvalid   = 1 << 13
+	FlagDirectory = 1 << 14
 )
 
 type FileInfo struct {

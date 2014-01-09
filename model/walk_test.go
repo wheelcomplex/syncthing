@@ -13,6 +13,7 @@ var testdata = []struct {
 	hash string
 }{
 	{"bar", 10, "2f72cc11a6fcd0271ecef8c61056ee1eb1243be3805bf9a9df98f92f7636b05c"},
+	{"baz", 0, ""},
 	{"baz/quux", 9, "c154d94e94ba7298a6adb0523afe34d1b6a581d6b893a763d45ddc5e209dcb83"},
 	{"foo", 7, "aec070645fe53ee3b3763059376134f058cc337247c978add178b6ccdfb0019f"},
 }
@@ -34,8 +35,10 @@ func TestWalk(t *testing.T) {
 			t.Errorf("Incorrect file name %q != %q for case #%d", n1, n2, i)
 		}
 
-		if h1, h2 := fmt.Sprintf("%x", files[i].Blocks[0].Hash), testdata[i].hash; h1 != h2 {
-			t.Errorf("Incorrect hash %q != %q for case #%d", h1, h2, i)
+		if len(testdata[i].hash) > 0 {
+			if h1, h2 := fmt.Sprintf("%x", files[i].Blocks[0].Hash), testdata[i].hash; h1 != h2 {
+				t.Errorf("Incorrect hash %q != %q for case #%d", h1, h2, i)
+			}
 		}
 
 		t0 := time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
@@ -54,14 +57,17 @@ func TestFilteredWalk(t *testing.T) {
 	m := NewModel("testdata")
 	files := m.FilteredWalk(false)
 
-	if len(files) != 2 {
-		t.Fatalf("Incorrect number of walked filtered files %d != 2", len(files))
+	if len(files) != 3 {
+		t.Fatalf("Incorrect number of walked filtered files %d != 3", len(files))
 	}
 	if files[0].Name != "bar" {
 		t.Error("Incorrect first file", files[0])
 	}
-	if files[1].Name != "foo" {
+	if files[1].Name != "baz" {
 		t.Error("Incorrect second file", files[1])
+	}
+	if files[2].Name != "foo" {
+		t.Error("Incorrect third file", files[2])
 	}
 }
 

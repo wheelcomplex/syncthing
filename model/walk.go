@@ -63,6 +63,9 @@ func (m *Model) genWalker(res *[]File, ign map[string][]string) filepath.WalkFun
 		if err != nil {
 			return nil
 		}
+		if rn == "." {
+			return nil
+		}
 
 		if pn, sn := path.Split(rn); sn == ".stignore" {
 			pn := strings.Trim(pn, "/")
@@ -78,25 +81,44 @@ func (m *Model) genWalker(res *[]File, ign map[string][]string) filepath.WalkFun
 			return nil
 		}
 
-		if info.Mode()&os.ModeType == 0 {
-			fi, err := os.Stat(p)
-			if err != nil {
-				return nil
-			}
-			modified := fi.ModTime().Unix()
+		modified := info.ModTime().Unix()
 
-			m.RLock()
+		if info.IsDir() {
+			m.fieldLock.RLock()
 			hf, ok := m.local[rn]
-			m.RUnlock()
+			m.fieldLock.RUnlock()
 
 			if ok && hf.Modified == modified {
-				if nf := uint32(info.Mode()); nf != hf.Flags {
+				if nf := uint32(info.Mode() & 0xfff); nf != hf.Flags&0xfff {
+					hf.Flags = protocol.FlagDirectory | nf
+					hf.Version++
+				}
+				*res = append(*res, hf)
+			} else {
+				f := File{
+					Name:     rn,
+					Flags:    protocol.FlagDirectory | uint32(info.Mode())&0xfff,
+					Modified: modified,
+				}
+				*res = append(*res, f)
+			}
+
+			return nil
+		}
+
+		if info.Mode()&os.ModeType == 0 {
+			m.fieldLock.RLock()
+			hf, ok := m.local[rn]
+			m.fieldLock.RUnlock()
+
+			if ok && hf.Modified == modified {
+				if nf := uint32(info.Mode() & 0xfff); nf != hf.Flags {
 					hf.Flags = nf
 					hf.Version++
 				}
 				*res = append(*res, hf)
 			} else {
-				m.Lock()
+				m.fieldLock.Lock()
 				if m.shouldSuppressChange(rn) {
 					if m.trace["file"] {
 						log.Println("FILE: SUPPRESS:", rn, m.fileWasSuppressed[rn], time.Since(m.fileLastChanged[rn]))
@@ -107,10 +129,10 @@ func (m *Model) genWalker(res *[]File, ign map[string][]string) filepath.WalkFun
 						hf.Version++
 						*res = append(*res, hf)
 					}
-					m.Unlock()
+					m.fieldLock.Unlock()
 					return nil
 				}
-				m.Unlock()
+				m.fieldLock.Unlock()
 
 				if m.trace["file"] {
 					log.Printf("FILE: Hash %q", p)
@@ -133,7 +155,7 @@ func (m *Model) genWalker(res *[]File, ign map[string][]string) filepath.WalkFun
 				}
 				f := File{
 					Name:     rn,
-					Flags:    uint32(info.Mode()),
+					Flags:    uint32(info.Mode()) & 0xfff,
 					Modified: modified,
 					Blocks:   blocks,
 				}
@@ -148,6 +170,9 @@ func (m *Model) genWalker(res *[]File, ign map[string][]string) filepath.WalkFun
 // Walk returns the list of files found in the local repository by scanning the
 // file system. Files are blockwise hashed.
 func (m *Model) Walk(followSymlinks bool) (files []File, ignore map[string][]string) {
+	m.walkLock.Lock()
+	defer m.walkLock.Unlock()
+
 	ignore = make(map[string][]string)
 	fn := m.genWalker(&files, ignore)
 	filepath.Walk(m.dir, fn)
