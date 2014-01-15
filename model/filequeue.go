@@ -130,6 +130,7 @@ func (q *FileQueue) Done(file string, offset int64, data []byte) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
+	log.Println(file, offset, data)
 	c := content{
 		offset: offset,
 		data:   data,

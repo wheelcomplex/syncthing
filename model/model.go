@@ -31,6 +31,8 @@ type Model struct {
 	sync.RWMutex
 	dir string
 
+	recomputeCond *sync.Cond
+
 	global    map[string]File // the latest version of each file as it exists in the cluster
 	local     map[string]File // the files we currently have locally on disk
 	remote    map[string]map[string]File
@@ -38,6 +40,7 @@ type Model struct {
 	rawConn   map[string]io.Closer
 	fq        FileQueue // queue for files to fetch
 	dq        chan File // queue for files to delete
+	ignore    map[string][]string
 
 	updatedLocal int64 // timestamp of last update to local
 	updateGlobal int64 // timestamp of last update to remote
@@ -94,8 +97,10 @@ func NewModel(dir string) *Model {
 		fileWasSuppressed: make(map[string]int),
 		dq:                make(chan File),
 	}
+	m.recomputeCond = sync.NewCond(m)
 
 	go m.broadcastIndexLoop()
+	go m.recomputeLoop()
 	return m
 }
 
@@ -256,8 +261,7 @@ func (m *Model) Index(nodeID string, fs []protocol.FileInfo) {
 	}
 	m.remote[nodeID] = repo
 
-	m.recomputeGlobal()
-	m.recomputeNeed()
+	m.recomputeCond.Signal()
 }
 
 // IndexUpdate is called for incremental updates to connected nodes' indexes.
@@ -280,8 +284,7 @@ func (m *Model) IndexUpdate(nodeID string, fs []protocol.FileInfo) {
 		m.indexUpdate(repo, f)
 	}
 
-	m.recomputeGlobal()
-	m.recomputeNeed()
+	m.recomputeCond.Signal()
 }
 
 func (m *Model) indexUpdate(repo map[string]File, f protocol.FileInfo) {
@@ -317,8 +320,7 @@ func (m *Model) Close(node string, err error) {
 	delete(m.rawConn, node)
 	m.fq.RemoveAvailable(node)
 
-	m.recomputeGlobal()
-	m.recomputeNeed()
+	m.recomputeCond.Signal()
 }
 
 // Request returns the specified data segment by reading it from local disk.
@@ -388,10 +390,9 @@ func (m *Model) ReplaceLocal(fs []File) {
 
 	if updated {
 		m.local = newLocal
-		m.recomputeGlobal()
-		m.recomputeNeed()
 		m.updatedLocal = time.Now().Unix()
 		m.lastIdxBcastRequest = time.Now()
+		m.recomputeCond.Signal()
 	}
 }
 
@@ -407,8 +408,7 @@ func (m *Model) SeedLocal(fs []protocol.FileInfo) {
 		m.local[f.Name] = fileFromFileInfo(f)
 	}
 
-	m.recomputeGlobal()
-	m.recomputeNeed()
+	m.recomputeCond.Signal()
 }
 
 // ConnectedTo returns true if we are connected to the named node.
@@ -602,10 +602,9 @@ func (m *Model) updateLocalLocked(f File) {
 func (m *Model) updateLocal(f File) {
 	if ef, ok := m.local[f.Name]; !ok || !ef.Equals(f) {
 		m.local[f.Name] = f
-		m.recomputeGlobal()
-		m.recomputeNeed()
 		m.updatedLocal = time.Now().Unix()
 		m.lastIdxBcastRequest = time.Now()
+		m.recomputeCond.Signal()
 	}
 }
 
@@ -700,6 +699,16 @@ func (m *Model) recomputeNeed() {
 			m.dq <- gf
 		}
 	}()
+}
+
+func (m *Model) recomputeLoop() {
+	for {
+		m.Lock()
+		m.recomputeCond.Wait()
+		m.recomputeGlobal()
+		m.recomputeNeed()
+		m.Unlock()
+	}
 }
 
 func (m *Model) WhoHas(name string) []string {

@@ -21,6 +21,7 @@ import (
 	flags "github.com/calmh/syncthing/github.com/jessevdk/go-flags"
 	"github.com/calmh/syncthing/model"
 	"github.com/calmh/syncthing/protocol"
+	"github.com/calmh/syncthing/watch"
 )
 
 type Options struct {
@@ -218,14 +219,36 @@ func main() {
 		okln("Ready to synchronize (read only; no external updates accepted)")
 	}
 
-	// Periodically scan the repository and update the local model.
-	// XXX: Should use some fsnotify mechanism.
-	go func() {
-		for {
-			time.Sleep(opts.Advanced.ScanInterval)
-			updateLocalModel(m)
-		}
-	}()
+	// Subscribe to filesystem changes, or start a polling loop if that didn't work.
+
+	events, err := watch.Watch(dir)
+	if err != nil {
+		warnln("fsnotify unavailable:", err, "(polling)")
+		go func() {
+			for {
+				time.Sleep(opts.Advanced.ScanInterval)
+				updateLocalModel(m)
+			}
+		}()
+	} else {
+		go func() {
+			for event := range events {
+				m.RecheckFile(event.Name)
+			}
+		}()
+
+		go func() {
+			var prevModel = m.Generation()
+			for {
+				time.Sleep(opts.Advanced.ScanInterval)
+				if g := m.Generation(); g != prevModel {
+					saveIndex(m)
+				}
+			}
+		}()
+
+		infoln("Subscribed to filesystem changes")
+	}
 
 	if !opts.NoStats {
 		// Periodically print statistics
