@@ -10,25 +10,25 @@ func TestGlobalSet(t *testing.T) {
 	m := Model{}
 
 	local := []File{
-		File{FileKey{"a", 1000, 0, 0}, nil},
-		File{FileKey{"b", 1000, 0, 0}, nil},
-		File{FileKey{"c", 1000, 0, 0}, nil},
-		File{FileKey{"d", 1000, 0, 0}, nil},
+		File{Key{"a", 1000, 0, 0}, nil},
+		File{Key{"b", 1000, 0, 0}, nil},
+		File{Key{"c", 1000, 0, 0}, nil},
+		File{Key{"d", 1000, 0, 0}, nil},
 	}
 
 	remote := []File{
-		File{FileKey{"a", 1000, 0, 0}, nil},
-		File{FileKey{"b", 1001, 0, 0}, nil},
-		File{FileKey{"c", 1000, 1, 0}, nil},
-		File{FileKey{"e", 1000, 0, 0}, nil},
+		File{Key{"a", 1000, 0, 0}, nil},
+		File{Key{"b", 1001, 0, 0}, nil},
+		File{Key{"c", 1000, 1, 0}, nil},
+		File{Key{"e", 1000, 0, 0}, nil},
 	}
 
-	expectedGlobal := map[string]GlobalFile{
-		"a": GlobalFile{Key: local[0].Key, Availability: 3},
-		"b": GlobalFile{Key: remote[1].Key, Availability: 2},
-		"c": GlobalFile{Key: remote[2].Key, Availability: 2},
-		"d": GlobalFile{Key: local[3].Key, Availability: 1},
-		"e": GlobalFile{Key: remote[3].Key, Availability: 2},
+	expectedGlobal := map[string]globalRecord{
+		"a": globalRecord{key: local[0].Key, availability: 3},
+		"b": globalRecord{key: remote[1].Key, availability: 2},
+		"c": globalRecord{key: remote[2].Key, availability: 2},
+		"d": globalRecord{key: local[3].Key, availability: 1},
+		"e": globalRecord{key: remote[3].Key, availability: 2},
 	}
 
 	m.SetLocal(local)
@@ -48,12 +48,12 @@ func BenchmarkSetLocal10k(b *testing.B) {
 
 	var local []File
 	for i := 0; i < 10000; i++ {
-		local = append(local, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		local = append(local, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	var remote []File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		remote = append(remote, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	m.SetRemote(1, remote)
@@ -69,12 +69,12 @@ func BenchmarkSetLocal10(b *testing.B) {
 
 	var local []File
 	for i := 0; i < 10; i++ {
-		local = append(local, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		local = append(local, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	var remote []File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		remote = append(remote, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	m.SetRemote(1, remote)
@@ -90,12 +90,12 @@ func BenchmarkAddLocal10k(b *testing.B) {
 
 	var local []File
 	for i := 0; i < 10000; i++ {
-		local = append(local, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		local = append(local, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	var remote []File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		remote = append(remote, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	m.SetRemote(1, remote)
@@ -117,12 +117,12 @@ func BenchmarkAddLocal10(b *testing.B) {
 
 	var local []File
 	for i := 0; i < 10; i++ {
-		local = append(local, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		local = append(local, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	var remote []File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, File{FileKey{fmt.Sprintf("file%d"), 1000, 0, 0}, []Block{}})
+		remote = append(remote, File{Key{fmt.Sprintf("file%d"), 1000, 0, 0}, nil})
 	}
 
 	m.SetRemote(1, remote)
@@ -141,24 +141,24 @@ func TestGlobalReset(t *testing.T) {
 	m := Model{}
 
 	local := []File{
-		File{FileKey{"a", 1000, 0, 0}, nil},
-		File{FileKey{"b", 1000, 0, 0}, nil},
-		File{FileKey{"c", 1000, 0, 0}, nil},
-		File{FileKey{"d", 1000, 0, 0}, nil},
+		File{Key{"a", 1000, 0, 0}, nil},
+		File{Key{"b", 1000, 0, 0}, nil},
+		File{Key{"c", 1000, 0, 0}, nil},
+		File{Key{"d", 1000, 0, 0}, nil},
 	}
 
 	remote := []File{
-		File{FileKey{"a", 1000, 0, 0}, nil},
-		File{FileKey{"b", 1001, 0, 0}, nil},
-		File{FileKey{"c", 1000, 1, 0}, nil},
-		File{FileKey{"e", 1000, 0, 0}, nil},
+		File{Key{"a", 1000, 0, 0}, nil},
+		File{Key{"b", 1001, 0, 0}, nil},
+		File{Key{"c", 1000, 1, 0}, nil},
+		File{Key{"e", 1000, 0, 0}, nil},
 	}
 
-	expectedGlobal := map[string]GlobalFile{
-		"a": GlobalFile{Key: local[0].Key, Availability: 1},
-		"b": GlobalFile{Key: local[1].Key, Availability: 1},
-		"c": GlobalFile{Key: local[2].Key, Availability: 1},
-		"d": GlobalFile{Key: local[3].Key, Availability: 1},
+	expectedGlobal := map[string]globalRecord{
+		"a": globalRecord{key: local[0].Key, availability: 1},
+		"b": globalRecord{key: local[1].Key, availability: 1},
+		"c": globalRecord{key: local[2].Key, availability: 1},
+		"d": globalRecord{key: local[3].Key, availability: 1},
 	}
 
 	m.SetLocal(local)
@@ -178,23 +178,23 @@ func TestNeed(t *testing.T) {
 	m := Model{}
 
 	local := []File{
-		File{FileKey{"a", 1000, 0, 0}, nil},
-		File{FileKey{"b", 1000, 0, 0}, nil},
-		File{FileKey{"c", 1000, 0, 0}, nil},
-		File{FileKey{"d", 1000, 0, 0}, nil},
+		File{Key{"a", 1000, 0, 0}, nil},
+		File{Key{"b", 1000, 0, 0}, nil},
+		File{Key{"c", 1000, 0, 0}, nil},
+		File{Key{"d", 1000, 0, 0}, nil},
 	}
 
 	remote := []File{
-		File{FileKey{"a", 1000, 0, 0}, nil},
-		File{FileKey{"b", 1001, 0, 0}, nil},
-		File{FileKey{"c", 1000, 1, 0}, nil},
-		File{FileKey{"e", 1000, 0, 0}, nil},
+		File{Key{"a", 1000, 0, 0}, nil},
+		File{Key{"b", 1001, 0, 0}, nil},
+		File{Key{"c", 1000, 1, 0}, nil},
+		File{Key{"e", 1000, 0, 0}, nil},
 	}
 
 	shouldNeed := []File{
-		File{FileKey{"b", 1001, 0, 0}, nil},
-		File{FileKey{"c", 1000, 1, 0}, nil},
-		File{FileKey{"e", 1000, 0, 0}, nil},
+		File{Key{"b", 1001, 0, 0}, nil},
+		File{Key{"c", 1000, 1, 0}, nil},
+		File{Key{"e", 1000, 0, 0}, nil},
 	}
 
 	m.SetLocal(local)
