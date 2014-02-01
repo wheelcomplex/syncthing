@@ -200,7 +200,7 @@ func TestNeed(t *testing.T) {
 	m.SetLocal(local)
 	m.SetRemote(1, remote)
 
-	need := m.Need()
+	need := m.Need(0)
 	if !reflect.DeepEqual(need, shouldNeed) {
 		t.Errorf("Need incorrect;\n%v !=\n%v", need, shouldNeed)
 	}

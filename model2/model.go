@@ -158,12 +158,12 @@ func (m *Model) unlockedSetRemote(cid uint, fs []File) {
 	m.unlockedAddRemote(cid, fs)
 }
 
-func (m *Model) Need() []File {
+func (m *Model) Need(cid uint) []File {
 	var fs []File
 	m.mutex.Lock()
 
 	for name, gf := range m.global {
-		if gf.key.newerThan(m.files[0][name]) {
+		if gf.key.newerThan(m.files[cid][name]) {
 			fs = append(fs, File{gf.key, m.blocks[gf.key].Data})
 		}
 	}
