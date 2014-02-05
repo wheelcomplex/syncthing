@@ -58,18 +58,25 @@ func (m *Model) SetLocal(fs []File) {
 }
 
 func (m *Model) AddRemote(cid uint, fs []File) {
+	if cid < 1 || cid > 63 {
+		panic("Connection ID must be in the range 1 - 63 inclusive")
+	}
 	m.mutex.Lock()
 	m.unlockedAddRemote(cid, fs)
 	m.mutex.Unlock()
 }
 
 func (m *Model) SetRemote(cid uint, fs []File) {
+	if cid < 1 || cid > 63 {
+		panic("Connection ID must be in the range 1 - 63 inclusive")
+	}
 	m.mutex.Lock()
 	m.unlockedSetRemote(cid, fs)
 	m.mutex.Unlock()
 }
 
 func (m *Model) unlockedAddRemote(cid uint, fs []File) {
+	cidBit := availability(1 << cid)
 	fm := m.files[cid]
 	for _, f := range fs {
 		n := f.Key.Name
@@ -94,12 +101,12 @@ func (m *Model) unlockedAddRemote(cid uint, fs []File) {
 		gf, ok := m.global[n]
 		switch {
 		case ok && f.Key.Version == gf.key.Version && f.Key.Modified == gf.key.Modified:
-			gf.availability |= 1 << cid
+			gf.availability |= cidBit
 			m.global[n] = gf
 		case f.Key.newerThan(gf.key):
 			m.global[n] = globalRecord{
 				key:          f.Key,
-				availability: 1 << cid,
+				availability: cidBit,
 			}
 		}
 	}
