@@ -91,7 +91,7 @@ message.
         string Name<>;
         unsigned int Flags;
         hyper Modified;
-        unsigned int Version;
+        hyper Changed;
         BlockInfo Blocks<>;
     }
 
@@ -100,14 +100,20 @@ message.
         opaque Hash<>
     }
 
-The file name is the part relative to the repository root. The
-modification time is expressed as the number of seconds since the Unix
-Epoch. The version field is a counter that increments each time the file
-changes but resets to zero each time the modification is updated. This
-is used to signal changes to the file (or file metadata) while the
-modification time remains unchanged. The hash algorithm is implied by
-the hash length. Currently, the hash must be 32 bytes long and computed
-by SHA256.
+The file name is the part relative to the repository root. The file's
+modification time (Modified) is expressed as the number of seconds since
+the Unix Epoch.
+
+The Changed time is the time of last detected change, not necessarily
+equal to the Modified time. The Changed field is expressed as the number
+of seconds since the Unix Epoch. The Changed field will always increment
+when changes to the file data or metadata are detected, even though the
+file modification time might not have changed or might indeed move
+backwards. When determining the most current version of a file in a
+cluster, the file with the highest Changed timestamp wins.
+
+The hash algorithm is implied by the hash length. Currently, the hash
+must be 32 bytes long and computed by SHA256.
 
 The flags field is made up of the following single bit flags:
 
