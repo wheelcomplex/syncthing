@@ -274,7 +274,7 @@ func (m *Model) NeedFiles() (files []scanner.File, bytes int64) {
 // Index is called when a new node is connected and we receive their full index.
 // Implements the protocol.Model interface.
 func (m *Model) Index(nodeID, repoName string, fs []protocol.FileInfo) {
-	var files = make([]File, len(fs))
+	var files = make([]scanner.File, len(fs))
 	for i := range fs {
 		files[i] = fileFromFileInfo(fs[i])
 	}
@@ -302,7 +302,7 @@ func (m *Model) Index(nodeID, repoName string, fs []protocol.FileInfo) {
 // IndexUpdate is called for incremental updates to connected nodes' indexes.
 // Implements the protocol.Model interface.
 func (m *Model) IndexUpdate(nodeID, repoName string, fs []protocol.FileInfo) {
-	var files = make([]File, len(fs))
+	var files = make([]scanner.File, len(fs))
 	for i := range fs {
 		files[i] = fileFromFileInfo(fs[i])
 	}
@@ -883,47 +883,4 @@ func (m *Model) deleteLoop() {
 
 		m.updateLocal(file)
 	}
-}
-
-func fileFromFileInfo(f protocol.FileInfo) scanner.File {
-	var blocks = make([]scanner.Block, len(f.Blocks))
-	var offset int64
-	for i, b := range f.Blocks {
-		blocks[i] = scanner.Block{
-			Offset: offset,
-			Size:   b.Size,
-			Hash:   b.Hash,
-		}
-		offset += int64(b.Size)
-	}
-	return scanner.File{
-		Name:       f.Name,
-		Size:       offset,
-		Flags:      f.Flags &^ protocol.FlagInvalid,
-		Modified:   f.Modified,
-		Version:    f.Version,
-		Blocks:     blocks,
-		Suppressed: f.Flags&protocol.FlagInvalid != 0,
-	}
-}
-
-func fileInfoFromFile(f scanner.File) protocol.FileInfo {
-	var blocks = make([]protocol.BlockInfo, len(f.Blocks))
-	for i, b := range f.Blocks {
-		blocks[i] = protocol.BlockInfo{
-			Size: b.Size,
-			Hash: b.Hash,
-		}
-	}
-	pf := protocol.FileInfo{
-		Name:     f.Name,
-		Flags:    f.Flags,
-		Modified: f.Modified,
-		Version:  f.Version,
-		Blocks:   blocks,
-	}
-	if f.Suppressed {
-		pf.Flags |= protocol.FlagInvalid
-	}
-	return pf
 }
