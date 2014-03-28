@@ -14,7 +14,6 @@ import (
 	"github.com/calmh/syncthing/buffers"
 	"github.com/calmh/syncthing/cid"
 	"github.com/calmh/syncthing/files"
-	"github.com/calmh/syncthing/lamport"
 	"github.com/calmh/syncthing/protocol"
 	"github.com/calmh/syncthing/scanner"
 )
@@ -210,7 +209,6 @@ func (m *Model) NeedFiles() ([]scanner.File, int64) {
 func (m *Model) Index(nodeID string, fs []protocol.FileInfo) {
 	var files = make([]scanner.File, len(fs))
 	for i := range fs {
-		lamport.Default.Tick(fs[i].Version)
 		files[i] = fileFromFileInfo(fs[i])
 	}
 
@@ -227,7 +225,6 @@ func (m *Model) Index(nodeID string, fs []protocol.FileInfo) {
 func (m *Model) IndexUpdate(nodeID string, fs []protocol.FileInfo) {
 	var files = make([]scanner.File, len(fs))
 	for i := range fs {
-		lamport.Default.Tick(fs[i].Version)
 		files[i] = fileFromFileInfo(fs[i])
 	}
 
@@ -312,7 +309,6 @@ func (m *Model) ReplaceLocal(fs []scanner.File) {
 func (m *Model) SeedLocal(fs []protocol.FileInfo) {
 	var sfs = make([]scanner.File, len(fs))
 	for i := 0; i < len(fs); i++ {
-		lamport.Default.Tick(fs[i].Version)
 		sfs[i] = fileFromFileInfo(fs[i])
 	}
 

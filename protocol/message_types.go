@@ -9,7 +9,7 @@ type FileInfo struct {
 	Name     string // max:1024
 	Flags    uint32
 	Modified int64
-	Version  uint64
+	Version  []int64
 	Blocks   []BlockInfo // max:100000
 }
 

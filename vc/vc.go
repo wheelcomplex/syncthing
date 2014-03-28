@@ -1,7 +1,5 @@
 package vc
 
-import "time"
-
 type Order int
 
 const (
@@ -11,36 +9,34 @@ const (
 	Conflicting       = 2
 )
 
-type Clock []int64
-
-func (c Clock) Inc(i int) {
-	t := time.Now().UnixNano()
-	if c[i] < t {
-		c[i] = t
-	} else {
-		c[i]++
-	}
+func Inc(i int, c []int64) {
+	c[i]++
 }
 
-func (c Clock) IncCopy(i int) Clock {
-	cn := make(Clock, len(c))
-	copy(cn, c)
-	cn.Inc(i)
-	return cn
+func Copy(c []int64) []int64 {
+	v := make([]int64, len(c))
+	copy(v, c)
+	return v
 }
 
-func (c Clock) CompareTo(o Clock) Order {
+func Compare(a, b []int64) Order {
 	var r Order
-	if len(c) != len(o) {
+	if a == nil {
+		return Lesser
+	}
+	if b == nil {
+		return Greater
+	}
+	if len(a) != len(b) {
 		panic("different length clocks are incomparable")
 	}
-	for i := range c {
+	for i := range a {
 		switch {
-		case c[i] < o[i] && (r == Lesser || r == Equal):
+		case a[i] < b[i] && (r == Lesser || r == Equal):
 			r = Lesser
-		case c[i] > o[i] && (r == Greater || r == Equal):
+		case a[i] > b[i] && (r == Greater || r == Equal):
 			r = Greater
-		case c[i] != o[i]:
+		case a[i] != b[i]:
 			return Conflicting
 		}
 	}

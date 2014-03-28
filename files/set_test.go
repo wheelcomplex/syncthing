@@ -30,25 +30,25 @@ func TestGlobalSet(t *testing.T) {
 	m := NewSet()
 
 	local := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1000},
-		scanner.File{Name: "c", Version: 1000},
-		scanner.File{Name: "d", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1000}},
+		scanner.File{Name: "c", Version: []int64{1000}},
+		scanner.File{Name: "d", Version: []int64{1000}},
 	}
 
 	remote := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1001},
-		scanner.File{Name: "c", Version: 1002},
-		scanner.File{Name: "e", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1001}},
+		scanner.File{Name: "c", Version: []int64{1002}},
+		scanner.File{Name: "e", Version: []int64{1000}},
 	}
 
 	expectedGlobal := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1001},
-		scanner.File{Name: "c", Version: 1002},
-		scanner.File{Name: "d", Version: 1000},
-		scanner.File{Name: "e", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1001}},
+		scanner.File{Name: "c", Version: []int64{1002}},
+		scanner.File{Name: "d", Version: []int64{1000}},
+		scanner.File{Name: "e", Version: []int64{1000}},
 	}
 
 	m.ReplaceWithDelete(cid.LocalID, local)
@@ -73,10 +73,10 @@ func TestLocalDeleted(t *testing.T) {
 	lamport.Default = lamport.Clock{}
 
 	local1 := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1000},
-		scanner.File{Name: "c", Version: 1000},
-		scanner.File{Name: "d", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1000}},
+		scanner.File{Name: "c", Version: []int64{1000}},
+		scanner.File{Name: "d", Version: []int64{1000}},
 	}
 
 	local2 := []scanner.File{
@@ -86,9 +86,9 @@ func TestLocalDeleted(t *testing.T) {
 
 	expectedGlobal := []scanner.File{
 		local1[0],
-		scanner.File{Name: "b", Version: 1001, Flags: protocol.FlagDeleted},
+		scanner.File{Name: "b", Version: []int64{1001}, Flags: protocol.FlagDeleted},
 		local1[2],
-		scanner.File{Name: "d", Version: 1002, Flags: protocol.FlagDeleted},
+		scanner.File{Name: "d", Version: []int64{1001}, Flags: protocol.FlagDeleted},
 	}
 
 	m.ReplaceWithDelete(cid.LocalID, local1)
@@ -109,12 +109,12 @@ func BenchmarkSetLocal10k(b *testing.B) {
 
 	var local []scanner.File
 	for i := 0; i < 10000; i++ {
-		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	var remote []scanner.File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	m.Replace(1, remote)
@@ -130,12 +130,12 @@ func BenchmarkSetLocal10(b *testing.B) {
 
 	var local []scanner.File
 	for i := 0; i < 10; i++ {
-		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	var remote []scanner.File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	m.Replace(1, remote)
@@ -151,12 +151,12 @@ func BenchmarkAddLocal10k(b *testing.B) {
 
 	var local []scanner.File
 	for i := 0; i < 10000; i++ {
-		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	var remote []scanner.File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	m.Replace(1, remote)
@@ -166,7 +166,7 @@ func BenchmarkAddLocal10k(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		for j := range local {
-			local[j].Version++
+			local[j].Version[0]++
 		}
 		b.StartTimer()
 		m.Update(cid.LocalID, local)
@@ -178,12 +178,12 @@ func BenchmarkAddLocal10(b *testing.B) {
 
 	var local []scanner.File
 	for i := 0; i < 10; i++ {
-		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		local = append(local, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	var remote []scanner.File
 	for i := 0; i < 10000; i++ {
-		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: 1000})
+		remote = append(remote, scanner.File{Name: fmt.Sprintf("file%d"), Version: []int64{1000}})
 	}
 
 	m.Replace(1, remote)
@@ -192,7 +192,7 @@ func BenchmarkAddLocal10(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for j := range local {
-			local[j].Version++
+			local[j].Version[0]++
 		}
 		m.Update(cid.LocalID, local)
 	}
@@ -202,17 +202,17 @@ func TestGlobalReset(t *testing.T) {
 	m := NewSet()
 
 	local := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1000},
-		scanner.File{Name: "c", Version: 1000},
-		scanner.File{Name: "d", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1000}},
+		scanner.File{Name: "c", Version: []int64{1000}},
+		scanner.File{Name: "d", Version: []int64{1000}},
 	}
 
 	remote := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1001},
-		scanner.File{Name: "c", Version: 1002},
-		scanner.File{Name: "e", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1001}},
+		scanner.File{Name: "c", Version: []int64{1002}},
+		scanner.File{Name: "e", Version: []int64{1000}},
 	}
 
 	expectedGlobalKey := map[string]key{
@@ -239,23 +239,23 @@ func TestNeed(t *testing.T) {
 	m := NewSet()
 
 	local := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1000},
-		scanner.File{Name: "c", Version: 1000},
-		scanner.File{Name: "d", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1000}},
+		scanner.File{Name: "c", Version: []int64{1000}},
+		scanner.File{Name: "d", Version: []int64{1000}},
 	}
 
 	remote := []scanner.File{
-		scanner.File{Name: "a", Version: 1000},
-		scanner.File{Name: "b", Version: 1001},
-		scanner.File{Name: "c", Version: 1002},
-		scanner.File{Name: "e", Version: 1000},
+		scanner.File{Name: "a", Version: []int64{1000}},
+		scanner.File{Name: "b", Version: []int64{1001}},
+		scanner.File{Name: "c", Version: []int64{1002}},
+		scanner.File{Name: "e", Version: []int64{1000}},
 	}
 
 	shouldNeed := []scanner.File{
-		scanner.File{Name: "b", Version: 1001},
-		scanner.File{Name: "c", Version: 1002},
-		scanner.File{Name: "e", Version: 1000},
+		scanner.File{Name: "b", Version: []int64{1001}},
+		scanner.File{Name: "c", Version: []int64{1002}},
+		scanner.File{Name: "e", Version: []int64{1000}},
 	}
 
 	m.ReplaceWithDelete(cid.LocalID, local)

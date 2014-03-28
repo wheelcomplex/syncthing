@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/calmh/syncthing/lamport"
 )
 
 type Walker struct {
@@ -193,7 +191,7 @@ func (w *Walker) walkAndHashFiles(res *[]File, ign map[string][]string) filepath
 						w.suppressed[rn] = true
 						log.Printf("INFO: Changes to %q are being temporarily suppressed because it changes too frequently.", p)
 						cf.Suppressed = true
-						cf.Version++
+						cf.Changed = true
 					}
 					if debug {
 						dlog.Println("suppressed:", cf)
@@ -229,11 +227,11 @@ func (w *Walker) walkAndHashFiles(res *[]File, ign map[string][]string) filepath
 			}
 			f := File{
 				Name:     rn,
-				Version:  lamport.Default.Tick(0),
 				Size:     info.Size(),
 				Flags:    uint32(info.Mode()),
 				Modified: info.ModTime().Unix(),
 				Blocks:   blocks,
+				Changed:  true,
 			}
 			*res = append(*res, f)
 		}

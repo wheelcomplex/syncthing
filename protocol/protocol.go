@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/calmh/syncthing/buffers"
+	"github.com/calmh/syncthing/vc"
 	"github.com/calmh/syncthing/xdr"
 )
 
@@ -66,7 +67,7 @@ type rawConnection struct {
 	closed      chan struct{}
 	awaiting    map[int]chan asyncResult
 	nextID      int
-	indexSent   map[string]map[string][2]int64
+	indexSent   map[string]map[string][]int64
 	peerOptions map[string]string
 	myOptions   map[string]string
 	optionsLock sync.Mutex
@@ -103,7 +104,7 @@ func NewConnection(nodeID string, reader io.Reader, writer io.Writer, receiver M
 		xw:        xdr.NewWriter(flwr),
 		closed:    make(chan struct{}),
 		awaiting:  make(map[int]chan asyncResult),
-		indexSent: make(map[string]map[string][2]int64),
+		indexSent: make(map[string]map[string][]int64),
 	}
 
 	go c.readerLoop()
@@ -150,18 +151,18 @@ func (c *rawConnection) Index(repo string, idx []FileInfo) {
 		// This is the first time we send an index.
 		msgType = messageTypeIndex
 
-		c.indexSent[repo] = make(map[string][2]int64)
+		c.indexSent[repo] = make(map[string][]int64)
 		for _, f := range idx {
-			c.indexSent[repo][f.Name] = [2]int64{f.Modified, int64(f.Version)}
+			c.indexSent[repo][f.Name] = vc.Copy(f.Version)
 		}
 	} else {
 		// We have sent one full index. Only send updates now.
 		msgType = messageTypeIndexUpdate
 		var diff []FileInfo
 		for _, f := range idx {
-			if vs, ok := c.indexSent[repo][f.Name]; !ok || f.Modified != vs[0] || int64(f.Version) != vs[1] {
+			if vs, ok := c.indexSent[repo][f.Name]; !ok || vc.Compare(f.Version, vs) != vc.Equal {
 				diff = append(diff, f)
-				c.indexSent[repo][f.Name] = [2]int64{f.Modified, int64(f.Version)}
+				c.indexSent[repo][f.Name] = vc.Copy(f.Version)
 			}
 		}
 		idx = diff
