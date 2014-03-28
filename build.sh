@@ -15,6 +15,7 @@ build() {
 		godep=
 	fi
 	${godep} go build -ldflags "-w -X main.Version $version" ./cmd/syncthing
+	${godep} go build -ldflags "-w -X main.Version $version" ./cmd/stcli
 }
 
 prepare() {
@@ -26,9 +27,12 @@ test() {
 }
 
 sign() {
-	id=BCE524C7
-	if gpg --list-keys "$id" >/dev/null 2>&1 ; then
-		gpg -ab -u "$id" "$1"
+	if git describe --exact-match 2>/dev/null >/dev/null ; then
+		# HEAD is a tag
+		id=BCE524C7
+		if gpg --list-keys "$id" >/dev/null 2>&1 ; then
+			gpg -ab -u "$id" "$1"
+		fi
 	fi
 }
 
@@ -79,7 +83,7 @@ case "$1" in
 		test || exit 1
 
 		export GOARM=7
-		for os in darwin-amd64 linux-amd64 linux-arm freebsd-amd64 ; do
+		for os in darwin-amd64 linux-amd64 linux-arm freebsd-amd64 windows-amd64 ; do
 			export GOOS=${os%-*}
 			export GOARCH=${os#*-}
 

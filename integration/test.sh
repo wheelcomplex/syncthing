@@ -36,7 +36,7 @@ testConvergence() {
 	done
 
 	echo "Verifying..."
-	cat md5-* | sort | uniq > md5-tot
+	( grep -v identical md5-1 ; cat md5-2 ; grep -v identical md5-3 ) | sort | uniq > md5-tot
 
 	for i in 1 2 3 ; do
 		pushd "s$i" >/dev/null
@@ -75,9 +75,18 @@ for i in 1 2 3 ; do
 	popd >/dev/null
 done
 
+# file that differs in mtime but not in contents
+echo "  *: identical file"
+dd if=/dev/urandom of=s1/identical bs=1000 count=1000 2>/dev/null
+cp -a s1/identical s2/identical
+cp -a s1/identical s3/identical
+
 # instance 1 common file should be the newest, the other should disappear
 sleep 2
 touch "s1/common"
+
+# s2/identical should be the latest and override the others
+touch "s2/identical"
 
 echo "MD5-summing..."
 for i in 1 2 3 ; do
