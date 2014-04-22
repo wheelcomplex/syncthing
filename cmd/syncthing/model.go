@@ -123,27 +123,11 @@ func (m *Model) ConnectionStats() map[string]ConnectionInfo {
 			ci.Address = nc.RemoteAddr().String()
 		}
 
-		var tot int64
-		var have int64
-
-		for _, repo := range m.nodeRepos[node] {
-			for _, f := range m.repoFiles[repo].Global() {
-				if f.Flags&protocol.FlagDeleted == 0 {
-					tot += f.Size
-					have += f.Size
-				}
-			}
-
-			for _, f := range m.repoFiles[repo].Need(m.cm.Get(node)) {
-				if f.Flags&protocol.FlagDeleted == 0 {
-					have -= f.Size
-				}
-			}
-		}
+		var tot, has = m.nodeHas(node)
 
 		ci.Completion = 100
 		if tot != 0 {
-			ci.Completion = int(100 * have / tot)
+			ci.Completion = int(100 * has / tot)
 		}
 
 		res[node] = ci
@@ -153,6 +137,24 @@ func (m *Model) ConnectionStats() map[string]ConnectionInfo {
 	m.pmut.RUnlock()
 
 	return res
+}
+
+func (m *Model) nodeHas(node string) (has, tot int64) {
+	for _, repo := range m.nodeRepos[node] {
+		for _, f := range m.repoFiles[repo].Global() {
+			if f.Flags&protocol.FlagDeleted == 0 {
+				tot += f.Size
+				has += f.Size
+			}
+		}
+
+		for _, f := range m.repoFiles[repo].Need(m.cm.Get(node)) {
+			if f.Flags&protocol.FlagDeleted == 0 {
+				has -= f.Size
+			}
+		}
+	}
+	return
 }
 
 func sizeOf(fs []scanner.File) (files, deleted int, bytes int64) {
@@ -227,9 +229,17 @@ func (m *Model) Index(nodeID string, repo string, fs []protocol.FileInfo) {
 	m.rmut.RLock()
 	if r, ok := m.repoFiles[repo]; ok {
 		r.Replace(id, files)
+		tot, has := m.nodeHas(nodeID)
+		guiEvent(eventIndex, map[string]interface{}{
+			"node":       nodeID,
+			"repo":       repo,
+			"hasBytes":   has,
+			"totalBytes": tot,
+		})
 	} else {
 		warnf("Index from %s for nonexistant repo %q; dropping", nodeID, repo)
 	}
+
 	m.rmut.RUnlock()
 }
 
@@ -250,6 +260,13 @@ func (m *Model) IndexUpdate(nodeID string, repo string, fs []protocol.FileInfo) 
 	m.rmut.RLock()
 	if r, ok := m.repoFiles[repo]; ok {
 		r.Update(id, files)
+		tot, has := m.nodeHas(nodeID)
+		guiEvent(eventIndex, map[string]interface{}{
+			"node":       nodeID,
+			"repo":       repo,
+			"hasBytes":   has,
+			"totalBytes": tot,
+		})
 	} else {
 		warnf("Index update from %s for nonexistant repo %q; dropping", nodeID, repo)
 	}
@@ -307,6 +324,8 @@ func (m *Model) Close(node string, err error) {
 	delete(m.rawConn, node)
 	delete(m.nodeVer, node)
 	m.pmut.Unlock()
+
+	guiEvent(eventDisconnected, map[string]interface{}{"node": node})
 }
 
 // Request returns the specified data segment by reading it from local disk.
@@ -437,6 +456,8 @@ func (m *Model) AddConnection(rawConn io.Closer, protoConn protocol.Connection) 
 			protoConn.Index(repo, idx)
 		}
 	}()
+
+	guiEvent(eventConnected, map[string]interface{}{"node": nodeID})
 }
 
 // protocolIndex returns the current local index in protocol data types.

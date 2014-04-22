@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,12 +43,15 @@ func startGUI(cfg GUIConfiguration, m *Model) {
 	router.Get("/rest/need/:repo", restGetNeed)
 	router.Get("/rest/system", restGetSystem)
 	router.Get("/rest/errors", restGetErrors)
+	router.Get("/rest/events/:seen", restGetEvents)
 
 	router.Post("/rest/config", restPostConfig)
 	router.Post("/rest/restart", restPostRestart)
 	router.Post("/rest/reset", restPostReset)
 	router.Post("/rest/error", restPostError)
 	router.Post("/rest/error/clear", restClearErrors)
+
+	go eventPollLoop()
 
 	go func() {
 		mr := martini.New()
@@ -231,6 +235,25 @@ func showGuiError(err string) {
 		guiErrors = guiErrors[len(guiErrors)-5:]
 	}
 	guiErrorsMut.Unlock()
+}
+
+func restGetEvents(w http.ResponseWriter, params martini.Params) {
+	var myEvents []event
+
+	seen, _ := strconv.Atoi(params["seen"])
+	eventsMut.RLock()
+	for _, ev := range events {
+		if ev.ID > seen {
+			myEvents = append(myEvents, ev)
+		}
+	}
+	eventsMut.RUnlock()
+
+	if len(myEvents) == 0 {
+		myEvents = append(myEvents, waitForEvent())
+	}
+
+	json.NewEncoder(w).Encode(myEvents)
 }
 
 func basic(username string, passhash string) http.HandlerFunc {
