@@ -348,6 +348,14 @@ func (p *puller) handleBlock(b bqBlock) {
 			dlog.Printf("pull: %q: opening file %q", p.repo, f.Name)
 		}
 
+		guiEvent(eventPullStart, map[string]interface{}{
+			"repo":     p.repo,
+			"file":     f.Name,
+			"size":     f.Size,
+			"modified": f.Modified,
+			"flags":    f.Flags,
+		})
+
 		of.availability = uint64(p.model.repoFiles[p.repo].Availability(f.Name))
 		of.filepath = filepath.Join(p.dir, f.Name)
 		of.temp = filepath.Join(p.dir, defTempNamer.TempName(f.Name))
