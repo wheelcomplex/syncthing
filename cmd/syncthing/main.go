@@ -109,6 +109,22 @@ func main() {
 
 	confDir = expandTilde(confDir)
 
+	if _, err := os.Stat(confDir); err != nil && confDir == getDefaultConfDir() {
+		// We are supposed to use the default configuration directory. It
+		// doesn't exist. In the past our default has been ~/.syncthing, so if
+		// that directory exists we move it to the new default location and
+		// continue. We don't much care if this fails at this point, we will
+		// be checking that later.
+
+		oldDefault := expandTilde("~/.syncthing")
+		if _, err := os.Stat(oldDefault); err == nil {
+			os.MkdirAll(filepath.Dir(confDir), 0700)
+			if err := os.Rename(oldDefault, confDir); err == nil {
+				infoln("Moved config dir", oldDefault, "to", confDir)
+			}
+		}
+	}
+
 	// Ensure that our home directory exists and that we have a certificate and key.
 
 	ensureDir(confDir, 0700)
@@ -137,7 +153,7 @@ func main() {
 	cf, err := os.Open(cfgFile)
 	if err == nil {
 		// Read config.xml
-		cfg, err = readConfigXML(cf)
+		cfg, err = readConfigXML(cf, myID)
 		if err != nil {
 			fatalln(err)
 		}
@@ -148,7 +164,7 @@ func main() {
 		infoln("No config file; starting with empty defaults")
 		name, _ := os.Hostname()
 
-		cfg, err = readConfigXML(nil)
+		cfg, err = readConfigXML(nil, myID)
 		cfg.Repositories = []RepositoryConfiguration{
 			{
 				ID:        "default",
@@ -206,7 +222,6 @@ func main() {
 	m := NewModel(cfg.Options.MaxChangeKbps * 1000)
 
 	for i := range cfg.Repositories {
-		cfg.Repositories[i].Nodes = cleanNodeList(cfg.Repositories[i].Nodes, myID)
 		dir := expandTilde(cfg.Repositories[i].Directory)
 		ensureDir(dir, -1)
 		m.AddRepo(cfg.Repositories[i].ID, dir, cfg.Repositories[i].Nodes)
@@ -561,39 +576,47 @@ func ensureDir(dir string, mode int) {
 	}
 }
 
+func getDefaultConfDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		return filepath.Join(os.Getenv("AppData"), "Syncthing")
+
+	case "darwin":
+		return expandTilde("~/Library/Application Support/Syncthing")
+
+	default:
+		if xdgCfg := os.Getenv("XDG_CONFIG_HOME"); xdgCfg != "" {
+			return filepath.Join(xdgCfg, "syncthing")
+		} else {
+			return expandTilde("~/.config/syncthing")
+		}
+	}
+}
+
 func expandTilde(p string) string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || !strings.HasPrefix(p, "~/") {
 		return p
 	}
 
-	if strings.HasPrefix(p, "~/") {
-		return strings.Replace(p, "~", getUnixHomeDir(), 1)
-	}
-	return p
-}
-
-func getUnixHomeDir() string {
-	home := os.Getenv("HOME")
-	if home == "" {
-		fatalln("No home directory?")
-	}
-	return home
+	return filepath.Join(getHomeDir(), p[2:])
 }
 
 func getHomeDir() string {
-	if runtime.GOOS == "windows" {
-		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
-		if home == "" {
-			home = os.Getenv("USERPROFILE")
-		}
-		return home
-	}
-	return getUnixHomeDir()
-}
+	var home string
 
-func getDefaultConfDir() string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("AppData"), "syncthing")
+	switch runtime.GOOS {
+	case "windows":
+		home = filepath.Join(os.Getenv("HomeDrive"), os.Getenv("HomePath"))
+		if home == "" {
+			home = os.Getenv("UserProfile")
+		}
+	default:
+		home = os.Getenv("HOME")
 	}
-	return expandTilde("~/.syncthing")
+
+	if home == "" {
+		fatalln("No home directory found - set $HOME (or the platform equivalent).")
+	}
+
+	return home
 }

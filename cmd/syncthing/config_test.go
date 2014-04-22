@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -22,7 +23,7 @@ func TestDefaultValues(t *testing.T) {
 		UPnPEnabled:        true,
 	}
 
-	cfg, err := readConfigXML(bytes.NewReader(nil))
+	cfg, err := readConfigXML(bytes.NewReader(nil), "nodeID")
 	if err != io.EOF {
 		t.Error(err)
 	}
@@ -65,7 +66,7 @@ func TestNodeConfig(t *testing.T) {
 `)
 
 	for i, data := range [][]byte{v1data, v2data} {
-		cfg, err := readConfigXML(bytes.NewReader(data))
+		cfg, err := readConfigXML(bytes.NewReader(data), "node1")
 		if err != nil {
 			t.Error(err)
 		}
@@ -120,7 +121,7 @@ func TestNoListenAddress(t *testing.T) {
 </configuration>
 `)
 
-	cfg, err := readConfigXML(bytes.NewReader(data))
+	cfg, err := readConfigXML(bytes.NewReader(data), "nodeID")
 	if err != nil {
 		t.Error(err)
 	}
@@ -169,12 +170,57 @@ func TestOverriddenValues(t *testing.T) {
 		UPnPEnabled:        false,
 	}
 
-	cfg, err := readConfigXML(bytes.NewReader(data))
+	cfg, err := readConfigXML(bytes.NewReader(data), "nodeID")
 	if err != nil {
 		t.Error(err)
 	}
 
 	if !reflect.DeepEqual(cfg.Options, expected) {
 		t.Errorf("Overridden config differs;\n  E: %#v\n  A: %#v", expected, cfg.Options)
+	}
+}
+
+func TestNodeAddresses(t *testing.T) {
+	data := []byte(`
+<configuration version="2">
+    <node id="n1">
+        <address>dynamic</address>
+    </node>
+    <node id="n2">
+        <address></address>
+    </node>
+    <node id="n3">
+    </node>
+</configuration>
+`)
+
+	name, _ := os.Hostname()
+	expected := []NodeConfiguration{
+		{
+			NodeID:    "n1",
+			Addresses: []string{"dynamic"},
+		},
+		{
+			NodeID:    "n2",
+			Addresses: []string{"dynamic"},
+		},
+		{
+			NodeID:    "n3",
+			Addresses: []string{"dynamic"},
+		},
+		{
+			NodeID:    "n4",
+			Name:      name, // Set when auto created
+			Addresses: []string{"dynamic"},
+		},
+	}
+
+	cfg, err := readConfigXML(bytes.NewReader(data), "n4")
+	if err != nil {
+		t.Error(err)
+	}
+
+	if !reflect.DeepEqual(cfg.Nodes, expected) {
+		t.Errorf("Nodes differ;\n  E: %#v\n  A: %#v", expected, cfg.Nodes)
 	}
 }
