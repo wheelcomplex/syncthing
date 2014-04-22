@@ -17,6 +17,9 @@ const (
 	eventConnected              = "NODE_CONNECTED"
 	eventDisconnected           = "NODE_DISCONNECTED"
 	eventIndex                  = "NODE_INDEX"
+	eventPullStart              = "PULL_START"
+	eventPullComplete           = "PULL_COMPLETE"
+	eventPullError              = "PULL_ERROR"
 )
 
 type event struct {
