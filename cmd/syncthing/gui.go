@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io/ioutil"
+	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -13,7 +15,6 @@ import (
 	"time"
 
 	"code.google.com/p/go.crypto/bcrypt"
-	"github.com/calmh/syncthing/scanner"
 	"github.com/codegangsta/martini"
 )
 
@@ -26,21 +27,27 @@ var (
 	configInSync = true
 	guiErrors    = []guiError{}
 	guiErrorsMut sync.Mutex
+	static       = embeddedStatic()
+	staticFunc   = static.(func(http.ResponseWriter, *http.Request, *log.Logger))
 )
 
 const (
 	unchangedPassword = "--password-unchanged--"
 )
 
-func startGUI(cfg GUIConfiguration, m *Model) {
+func startGUI(cfg GUIConfiguration, m *Model) error {
+	l, err := net.Listen("tcp", cfg.Address)
+	if err != nil {
+		return err
+	}
+
 	router := martini.NewRouter()
 	router.Get("/", getRoot)
 	router.Get("/rest/version", restGetVersion)
-	router.Get("/rest/model/:repo", restGetModel)
+	router.Get("/rest/model", restGetModel)
 	router.Get("/rest/connections", restGetConnections)
 	router.Get("/rest/config", restGetConfig)
 	router.Get("/rest/config/sync", restGetConfigInSync)
-	router.Get("/rest/need/:repo", restGetNeed)
 	router.Get("/rest/system", restGetSystem)
 	router.Get("/rest/errors", restGetErrors)
 	router.Get("/rest/events/:seen", restGetEvents)
@@ -51,27 +58,25 @@ func startGUI(cfg GUIConfiguration, m *Model) {
 	router.Post("/rest/error", restPostError)
 	router.Post("/rest/error/clear", restClearErrors)
 
-	go eventPollLoop()
+	mr := martini.New()
+	if len(cfg.User) > 0 && len(cfg.Password) > 0 {
+		mr.Use(basic(cfg.User, cfg.Password))
+	}
+	mr.Use(static)
+	mr.Use(martini.Recovery())
+	mr.Use(restMiddleware)
+	mr.Action(router.Handle)
+	mr.Map(m)
 
-	go func() {
-		mr := martini.New()
-		if len(cfg.User) > 0 && len(cfg.Password) > 0 {
-			mr.Use(basic(cfg.User, cfg.Password))
-		}
-		mr.Use(embeddedStatic())
-		mr.Use(martini.Recovery())
-		mr.Use(restMiddleware)
-		mr.Action(router.Handle)
-		mr.Map(m)
-		err := http.ListenAndServe(cfg.Address, mr)
-		if err != nil {
-			warnln("GUI not possible:", err)
-		}
-	}()
+	go eventPollLoop()
+	go http.Serve(l, mr)
+
+	return nil
 }
 
 func getRoot(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/index.html", 302)
+	r.URL.Path = "/index.html"
+	staticFunc(w, r, nil)
 }
 
 func restMiddleware(w http.ResponseWriter, r *http.Request) {
@@ -84,9 +89,17 @@ func restGetVersion() string {
 	return Version
 }
 
-func restGetModel(m *Model, w http.ResponseWriter, params martini.Params) {
-	var repo = params["repo"]
+func restGetModel(m *Model, w http.ResponseWriter, r *http.Request) {
+	var qs = r.URL.Query()
+	var repo = qs.Get("repo")
 	var res = make(map[string]interface{})
+
+	for _, cr := range cfg.Repositories {
+		if cr.ID == repo {
+			res["invalid"] = cr.Invalid
+			break
+		}
+	}
 
 	globalFiles, globalDeleted, globalBytes := m.GlobalSize(repo)
 	res["globalFiles"], res["globalDeleted"], res["globalBytes"] = globalFiles, globalDeleted, globalBytes
@@ -155,34 +168,6 @@ func restPostReset(req *http.Request) {
 	go restart()
 }
 
-type guiFile scanner.File
-
-func (f guiFile) MarshalJSON() ([]byte, error) {
-	type t struct {
-		Name     string
-		Size     int64
-		Modified int64
-		Flags    uint32
-	}
-	return json.Marshal(t{
-		Name:     f.Name,
-		Size:     scanner.File(f).Size,
-		Modified: f.Modified,
-		Flags:    f.Flags,
-	})
-}
-
-func restGetNeed(m *Model, w http.ResponseWriter, params martini.Params) {
-	repo := params["repo"]
-	files := m.NeedFilesRepo(repo)
-	gfs := make([]guiFile, len(files))
-	for i, f := range files {
-		gfs[i] = guiFile(f)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(gfs)
-}
-
 var cpuUsagePercent [10]float64 // The last ten seconds
 var cpuUsageLock sync.RWMutex
 
@@ -195,7 +180,7 @@ func restGetSystem(w http.ResponseWriter) {
 	res["goroutines"] = runtime.NumGoroutine()
 	res["alloc"] = m.Alloc
 	res["sys"] = m.Sys
-	if discoverer != nil {
+	if cfg.Options.GlobalAnnEnabled && discoverer != nil {
 		res["extAnnounceOK"] = discoverer.ExtAnnounceOK()
 	}
 	cpuUsageLock.RLock()

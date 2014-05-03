@@ -135,7 +135,10 @@ func (p *puller) run() {
 			case b := <-p.blocks:
 				p.model.setState(p.repo, RepoSyncing)
 				changed = true
-				p.handleBlock(b)
+				if p.handleBlock(b) {
+					// Block was fully handled, free up the slot
+					p.requestSlots <- true
+				}
 
 			case <-timeout:
 				if len(p.openFiles) == 0 && p.bq.empty() {
@@ -193,7 +196,7 @@ func (p *puller) runRO() {
 
 func (p *puller) fixupDirectories() {
 	var deleteDirs []string
-	fn := func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(p.dir, func(path string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			return nil
 		}
@@ -242,8 +245,7 @@ func (p *puller) fixupDirectories() {
 		}
 
 		return nil
-	}
-	filepath.Walk(p.dir, fn)
+	})
 
 	// Delete any queued directories
 	for i := len(deleteDirs) - 1; i >= 0; i-- {
@@ -278,54 +280,14 @@ func (p *puller) handleRequestResult(res requestResult) {
 	}
 
 	if of.done && of.outstanding == 0 {
-		if debugPull {
-			dlog.Printf("pull: closing %q / %q", p.repo, f.Name)
-		}
-		of.file.Close()
-		defer os.Remove(of.temp)
-
-		delete(p.openFiles, f.Name)
-
-		fd, err := os.Open(of.temp)
-		if err != nil {
-			if debugPull {
-				dlog.Printf("pull: error: %q / %q: %v", p.repo, f.Name, err)
-			}
-			return
-		}
-		hb, _ := scanner.Blocks(fd, BlockSize)
-		fd.Close()
-
-		if l0, l1 := len(hb), len(f.Blocks); l0 != l1 {
-			if debugPull {
-				dlog.Printf("pull: %q / %q: nblocks %d != %d", p.repo, f.Name, l0, l1)
-			}
-			return
-		}
-
-		for i := range hb {
-			if bytes.Compare(hb[i].Hash, f.Blocks[i].Hash) != 0 {
-				dlog.Printf("pull: %q / %q: block %d hash mismatch", p.repo, f.Name, i)
-				return
-			}
-		}
-
-		t := time.Unix(f.Modified, 0)
-		os.Chtimes(of.temp, t, t)
-		os.Chmod(of.temp, os.FileMode(f.Flags&0777))
-		defTempNamer.Show(of.temp)
-		if debugPull {
-			dlog.Printf("pull: rename %q / %q: %q", p.repo, f.Name, of.filepath)
-		}
-		if err := Rename(of.temp, of.filepath); err == nil {
-			p.model.updateLocal(p.repo, f)
-		} else {
-			dlog.Printf("pull: error: %q / %q: %v", p.repo, f.Name, err)
-		}
+		p.closeFile(f)
 	}
 }
 
-func (p *puller) handleBlock(b bqBlock) {
+// handleBlock fulfills the block request by copying, ignoring or fetching
+// from the network. Returns true if the block was fully handled
+// synchronously, i.e. if the slot can be reused.
+func (p *puller) handleBlock(b bqBlock) bool {
 	f := b.file
 
 	// For directories, simply making sure they exist is enough
@@ -336,8 +298,7 @@ func (p *puller) handleBlock(b bqBlock) {
 			os.MkdirAll(path, 0777)
 		}
 		p.model.updateLocal(p.repo, f)
-		p.requestSlots <- true
-		return
+		return true
 	}
 
 	of, ok := p.openFiles[f.Name]
@@ -377,8 +338,7 @@ func (p *puller) handleBlock(b bqBlock) {
 			if !b.last {
 				p.openFiles[f.Name] = of
 			}
-			p.requestSlots <- true
-			return
+			return true
 		}
 		defTempNamer.Hide(of.temp)
 	}
@@ -393,8 +353,7 @@ func (p *puller) handleBlock(b bqBlock) {
 			delete(p.openFiles, f.Name)
 		}
 
-		p.requestSlots <- true
-		return
+		return true
 	}
 
 	p.openFiles[f.Name] = of
@@ -402,15 +361,14 @@ func (p *puller) handleBlock(b bqBlock) {
 	switch {
 	case len(b.copy) > 0:
 		p.handleCopyBlock(b)
-		p.requestSlots <- true
+		return true
 
 	case b.block.Size > 0:
-		p.handleRequestBlock(b)
-		// Request slot gets freed in <-p.blocks case
+		return p.handleRequestBlock(b)
 
 	default:
 		p.handleEmptyBlock(b)
-		p.requestSlots <- true
+		return true
 	}
 }
 
@@ -458,11 +416,15 @@ func (p *puller) handleCopyBlock(b bqBlock) {
 	}
 }
 
-func (p *puller) handleRequestBlock(b bqBlock) {
-	// We have a block to get from the network
-
+// handleRequestBlock tries to pull a block from the network. Returns true if
+// the block could _not_ be fetched (i.e. it was fully handled, matching the
+// return criteria of handleBlock)
+func (p *puller) handleRequestBlock(b bqBlock) bool {
 	f := b.file
-	of := p.openFiles[f.Name]
+	of, ok := p.openFiles[f.Name]
+	if !ok {
+		panic("bug: request for non-open file")
+	}
 
 	node := p.oustandingPerNode.leastBusyNode(of.availability, p.model.cm)
 	if len(node) == 0 {
@@ -477,8 +439,7 @@ func (p *puller) handleRequestBlock(b bqBlock) {
 		} else {
 			p.openFiles[f.Name] = of
 		}
-		p.requestSlots <- true
-		return
+		return true
 	}
 
 	of.outstanding++
@@ -499,6 +460,8 @@ func (p *puller) handleRequestBlock(b bqBlock) {
 			err:      err,
 		}
 	}(node, b)
+
+	return false
 }
 
 func (p *puller) handleEmptyBlock(b bqBlock) {
@@ -548,5 +511,54 @@ func (p *puller) queueNeededBlocks() {
 	}
 	if debugPull && queued > 0 {
 		dlog.Printf("%q: queued %d blocks", p.repo, queued)
+	}
+}
+
+func (p *puller) closeFile(f scanner.File) {
+	if debugPull {
+		dlog.Printf("pull: closing %q / %q", p.repo, f.Name)
+	}
+
+	of := p.openFiles[f.Name]
+	of.file.Close()
+	defer os.Remove(of.temp)
+
+	delete(p.openFiles, f.Name)
+
+	fd, err := os.Open(of.temp)
+	if err != nil {
+		if debugPull {
+			dlog.Printf("pull: error: %q / %q: %v", p.repo, f.Name, err)
+		}
+		return
+	}
+	hb, _ := scanner.Blocks(fd, BlockSize)
+	fd.Close()
+
+	if l0, l1 := len(hb), len(f.Blocks); l0 != l1 {
+		if debugPull {
+			dlog.Printf("pull: %q / %q: nblocks %d != %d", p.repo, f.Name, l0, l1)
+		}
+		return
+	}
+
+	for i := range hb {
+		if bytes.Compare(hb[i].Hash, f.Blocks[i].Hash) != 0 {
+			dlog.Printf("pull: %q / %q: block %d hash mismatch", p.repo, f.Name, i)
+			return
+		}
+	}
+
+	t := time.Unix(f.Modified, 0)
+	os.Chtimes(of.temp, t, t)
+	os.Chmod(of.temp, os.FileMode(f.Flags&0777))
+	defTempNamer.Show(of.temp)
+	if debugPull {
+		dlog.Printf("pull: rename %q / %q: %q", p.repo, f.Name, of.filepath)
+	}
+	if err := Rename(of.temp, of.filepath); err == nil {
+		p.model.updateLocal(p.repo, f)
+	} else {
+		dlog.Printf("pull: error: %q / %q: %v", p.repo, f.Name, err)
 	}
 }

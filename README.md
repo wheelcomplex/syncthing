@@ -1,4 +1,4 @@
-syncthing [![Build Status](https://drone.io/github.com/calmh/syncthing/status.png)](https://drone.io/github.com/calmh/syncthing/latest)
+syncthing
 =========
 
 This is the `syncthing` project. The following are the project goals:
@@ -25,6 +25,11 @@ making sure large swarms of selfish agents behave and somehow work
 towards a common goal. Here we have a much smaller swarm of cooperative
 agents and a simpler approach will suffice.
 
+Getting Started
+---------------
+
+Take a look at the [getting started guide](http://discourse.syncthing.net/t/getting-started/46).
+
 Signed Releases
 ---------------
 
@@ -35,8 +40,9 @@ normal release bundle as `syncthing.asc` or `syncthing.exe.asc`.
 Documentation
 =============
 
-The syncthing documentation is kept on the
-[GitHub Wiki](https://github.com/calmh/syncthing/wiki).
+The [syncthing
+documentation](http://discourse.syncthing.net/category/documentation) is
+on the discourse site.
 
 License
 =======

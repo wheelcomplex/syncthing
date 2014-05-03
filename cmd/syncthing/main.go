@@ -83,9 +83,11 @@ const (
 func main() {
 	var reset bool
 	var showVersion bool
+	var doUpgrade bool
 	flag.StringVar(&confDir, "home", getDefaultConfDir(), "Set configuration directory")
 	flag.BoolVar(&reset, "reset", false, "Prepare to resync from cluster")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
+	flag.BoolVar(&doUpgrade, "upgrade", false, "Perform upgrade")
 	flag.Usage = usageFor(flag.CommandLine, usage, extraUsage)
 	flag.Parse()
 
@@ -96,6 +98,14 @@ func main() {
 
 	if showVersion {
 		fmt.Println(LongVersion)
+		return
+	}
+
+	if doUpgrade {
+		err := upgrade()
+		if err != nil {
+			fatalln(err)
+		}
 		return
 	}
 
@@ -158,17 +168,17 @@ func main() {
 			fatalln(err)
 		}
 		cf.Close()
-	}
-
-	if len(cfg.Repositories) == 0 {
+	} else {
 		infoln("No config file; starting with empty defaults")
 		name, _ := os.Hostname()
+		defaultRepo := filepath.Join(getHomeDir(), "Sync")
+		ensureDir(defaultRepo, 0755)
 
 		cfg, err = readConfigXML(nil, myID)
 		cfg.Repositories = []RepositoryConfiguration{
 			{
 				ID:        "default",
-				Directory: filepath.Join(getHomeDir(), "Sync"),
+				Directory: defaultRepo,
 				Nodes:     []NodeConfiguration{{NodeID: myID}},
 			},
 		}
@@ -221,17 +231,19 @@ func main() {
 
 	m := NewModel(cfg.Options.MaxChangeKbps * 1000)
 
-	for i := range cfg.Repositories {
-		dir := expandTilde(cfg.Repositories[i].Directory)
-		ensureDir(dir, -1)
-		m.AddRepo(cfg.Repositories[i].ID, dir, cfg.Repositories[i].Nodes)
+	for _, repo := range cfg.Repositories {
+		if repo.Invalid != "" {
+			continue
+		}
+		dir := expandTilde(repo.Directory)
+		m.AddRepo(repo.ID, dir, repo.Nodes)
 	}
 
 	// GUI
 	if cfg.GUI.Enabled && cfg.GUI.Address != "" {
 		addr, err := net.ResolveTCPAddr("tcp", cfg.GUI.Address)
 		if err != nil {
-			warnf("Cannot start GUI on %q: %v", cfg.GUI.Address, err)
+			fatalf("Cannot start GUI on %q: %v", cfg.GUI.Address, err)
 		} else {
 			var hostOpen, hostShow string
 			switch {
@@ -247,7 +259,10 @@ func main() {
 			}
 
 			infof("Starting web GUI on http://%s:%d/", hostShow, addr.Port)
-			startGUI(cfg.GUI, m)
+			err := startGUI(cfg.GUI, m)
+			if err != nil {
+				fatalln("Cannot start GUI:", err)
+			}
 			if cfg.Options.StartBrowser && len(os.Getenv("STRESTART")) == 0 {
 				openURL(fmt.Sprintf("http://%s:%d", hostOpen, addr.Port))
 			}
@@ -259,6 +274,29 @@ func main() {
 
 	infoln("Populating repository index")
 	m.LoadIndexes(confDir)
+
+	for _, repo := range cfg.Repositories {
+		if repo.Invalid != "" {
+			continue
+		}
+
+		dir := expandTilde(repo.Directory)
+
+		// Safety check. If the cached index contains files but the repository
+		// doesn't exist, we have a problem. We would assume that all files
+		// have been deleted which might not be the case, so abort instead.
+
+		if files, _, _ := m.LocalSize(repo.ID); files > 0 {
+			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+				warnf("Configured repository %q has index but directory %q is missing; not starting.", repo.ID, repo.Directory)
+				fatalf("Ensure that directory is present or remove repository from configuration.")
+			}
+		}
+
+		// Ensure that repository directories exist for newly configured repositories.
+		ensureDir(dir, -1)
+	}
+
 	m.ScanRepos()
 	m.SaveIndexes(confDir)
 
@@ -277,6 +315,10 @@ func main() {
 	go listenConnect(myID, m, tlsCfg)
 
 	for _, repo := range cfg.Repositories {
+		if repo.Invalid != "" {
+			continue
+		}
+
 		// Routine to pull blocks from other nodes to synchronize the local
 		// repository. Does not run when we are in read only (publish only) mode.
 		if repo.ReadOnly {
