@@ -72,13 +72,11 @@ type rawConnection struct {
 	xr     *xdr.Reader
 	writer io.WriteCloser
 
-	cw   *countingWriter
-	wb   *bufio.Writer
-	xw   *xdr.Writer
-	wmut sync.Mutex
-
-	close  chan error
-	closed chan struct{}
+	cw     *countingWriter
+	wb     *bufio.Writer
+	xw     *xdr.Writer
+	wmut   sync.Mutex
+	closed bool
 
 	awaiting  map[int]chan asyncResult
 	nextID    int
@@ -117,13 +115,10 @@ func NewConnection(nodeID string, reader io.Reader, writer io.Writer, receiver M
 		cw:        cw,
 		wb:        wb,
 		xw:        xdr.NewWriter(wb),
-		close:     make(chan error),
-		closed:    make(chan struct{}),
 		awaiting:  make(map[int]chan asyncResult),
 		indexSent: make(map[string]map[string][2]int64),
 	}
 
-	go c.closer()
 	go c.readerLoop()
 	go c.pingerLoop()
 
@@ -174,7 +169,7 @@ func (c *rawConnection) Index(repo string, idx []FileInfo) {
 	c.wmut.Unlock()
 
 	if err != nil {
-		c.close <- err
+		c.close(err)
 		return
 	}
 }
@@ -202,7 +197,7 @@ func (c *rawConnection) Request(repo string, name string, offset int64, size int
 	c.wmut.Unlock()
 
 	if err != nil {
-		c.close <- err
+		c.close(err)
 		return nil, err
 	}
 
@@ -231,7 +226,7 @@ func (c *rawConnection) ClusterConfig(config ClusterConfigMessage) {
 	c.wmut.Unlock()
 
 	if err != nil {
-		c.close <- err
+		c.close(err)
 	}
 }
 
@@ -253,7 +248,7 @@ func (c *rawConnection) ping() bool {
 	c.wmut.Unlock()
 
 	if err != nil {
-		c.close <- err
+		c.close(err)
 		return false
 	}
 
@@ -281,10 +276,18 @@ func (c *rawConnection) flush() error {
 	return nil
 }
 
-func (c *rawConnection) closer() {
-	err := <-c.close
+func (c *rawConnection) close(err error) {
+	c.imut.Lock()
+	c.wmut.Lock()
+	defer c.imut.Unlock()
+	defer c.wmut.Unlock()
 
-	close(c.closed)
+	if c.closed {
+		return
+	}
+
+	c.closed = true
+
 	for _, ch := range c.awaiting {
 		close(ch)
 	}
@@ -296,12 +299,9 @@ func (c *rawConnection) closer() {
 }
 
 func (c *rawConnection) isClosed() bool {
-	select {
-	case <-c.closed:
-		return true
-	default:
-		return false
-	}
+	c.wmut.Lock()
+	defer c.wmut.Unlock()
+	return c.closed
 }
 
 func (c *rawConnection) readerLoop() {
@@ -310,11 +310,11 @@ loop:
 		var hdr header
 		hdr.decodeXDR(c.xr)
 		if err := c.xr.Error(); err != nil {
-			c.close <- err
+			c.close(err)
 			break loop
 		}
 		if hdr.version != 0 {
-			c.close <- fmt.Errorf("protocol error: %s: unknown message version %#x", c.id, hdr.version)
+			c.close(fmt.Errorf("protocol error: %s: unknown message version %#x", c.id, hdr.version))
 			break loop
 		}
 
@@ -323,7 +323,7 @@ loop:
 			var im IndexMessage
 			im.decodeXDR(c.xr)
 			if err := c.xr.Error(); err != nil {
-				c.close <- err
+				c.close(err)
 				break loop
 			} else {
 
@@ -341,7 +341,7 @@ loop:
 			var im IndexMessage
 			im.decodeXDR(c.xr)
 			if err := c.xr.Error(); err != nil {
-				c.close <- err
+				c.close(err)
 				break loop
 			} else {
 				go c.receiver.IndexUpdate(c.id, im.Repository, im.Files)
@@ -351,7 +351,7 @@ loop:
 			var req RequestMessage
 			req.decodeXDR(c.xr)
 			if err := c.xr.Error(); err != nil {
-				c.close <- err
+				c.close(err)
 				break loop
 			}
 			go c.processRequest(hdr.msgID, req)
@@ -360,7 +360,7 @@ loop:
 			data := c.xr.ReadBytesMax(256 * 1024) // Sufficiently larger than max expected block size
 
 			if err := c.xr.Error(); err != nil {
-				c.close <- err
+				c.close(err)
 				break loop
 			}
 
@@ -382,7 +382,7 @@ loop:
 			err := c.flush()
 			c.wmut.Unlock()
 			if err != nil {
-				c.close <- err
+				c.close(err)
 				break loop
 			}
 
@@ -404,14 +404,14 @@ loop:
 			var cm ClusterConfigMessage
 			cm.decodeXDR(c.xr)
 			if err := c.xr.Error(); err != nil {
-				c.close <- err
+				c.close(err)
 				break loop
 			} else {
 				go c.receiver.ClusterConfig(c.id, cm)
 			}
 
 		default:
-			c.close <- fmt.Errorf("protocol error: %s: unknown message type %#x", c.id, hdr.msgType)
+			c.close(fmt.Errorf("protocol error: %s: unknown message type %#x", c.id, hdr.msgType))
 			break loop
 		}
 	}
@@ -429,7 +429,7 @@ func (c *rawConnection) processRequest(msgID int, req RequestMessage) {
 	buffers.Put(data)
 
 	if err != nil {
-		c.close <- err
+		c.close(err)
 	}
 }
 
@@ -437,6 +437,9 @@ func (c *rawConnection) pingerLoop() {
 	var rc = make(chan bool, 1)
 	ticker := time.Tick(pingIdleTime / 2)
 	for {
+		if c.isClosed() {
+			return
+		}
 		select {
 		case <-ticker:
 			go func() {
@@ -445,13 +448,11 @@ func (c *rawConnection) pingerLoop() {
 			select {
 			case ok := <-rc:
 				if !ok {
-					c.close <- fmt.Errorf("ping failure")
+					c.close(fmt.Errorf("ping failure"))
 				}
 			case <-time.After(pingTimeout):
-				c.close <- fmt.Errorf("ping timeout")
+				c.close(fmt.Errorf("ping timeout"))
 			}
-		case <-c.closed:
-			return
 		}
 	}
 }
