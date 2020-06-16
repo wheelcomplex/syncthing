@@ -12,11 +12,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	origAdler32 "hash/adler32"
+	mrand "math/rand"
 	"testing"
 	"testing/quick"
 
 	rollingAdler32 "github.com/chmduquesne/rollinghash/adler32"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/sha256"
 )
 
 var blocksTestData = []struct {
@@ -104,68 +106,6 @@ func TestBlocks(t *testing.T) {
 	}
 }
 
-var diffTestData = []struct {
-	a string
-	b string
-	s int
-	d []protocol.BlockInfo
-}{
-	{"contents", "contents", 1024, []protocol.BlockInfo{}},
-	{"", "", 1024, []protocol.BlockInfo{}},
-	{"contents", "contents", 3, []protocol.BlockInfo{}},
-	{"contents", "cantents", 3, []protocol.BlockInfo{{Offset: 0, Size: 3}}},
-	{"contents", "contants", 3, []protocol.BlockInfo{{Offset: 3, Size: 3}}},
-	{"contents", "cantants", 3, []protocol.BlockInfo{{Offset: 0, Size: 3}, {Offset: 3, Size: 3}}},
-	{"contents", "", 3, []protocol.BlockInfo{{Offset: 0, Size: 0}}},
-	{"", "contents", 3, []protocol.BlockInfo{{Offset: 0, Size: 3}, {Offset: 3, Size: 3}, {Offset: 6, Size: 2}}},
-	{"con", "contents", 3, []protocol.BlockInfo{{Offset: 3, Size: 3}, {Offset: 6, Size: 2}}},
-	{"contents", "con", 3, nil},
-	{"contents", "cont", 3, []protocol.BlockInfo{{Offset: 3, Size: 1}}},
-	{"cont", "contents", 3, []protocol.BlockInfo{{Offset: 3, Size: 3}, {Offset: 6, Size: 2}}},
-}
-
-func TestDiff(t *testing.T) {
-	for i, test := range diffTestData {
-		a, _ := Blocks(context.TODO(), bytes.NewBufferString(test.a), test.s, -1, nil, false)
-		b, _ := Blocks(context.TODO(), bytes.NewBufferString(test.b), test.s, -1, nil, false)
-		_, d := BlockDiff(a, b)
-		if len(d) != len(test.d) {
-			t.Fatalf("Incorrect length for diff %d; %d != %d", i, len(d), len(test.d))
-		} else {
-			for j := range test.d {
-				if d[j].Offset != test.d[j].Offset {
-					t.Errorf("Incorrect offset for diff %d block %d; %d != %d", i, j, d[j].Offset, test.d[j].Offset)
-				}
-				if d[j].Size != test.d[j].Size {
-					t.Errorf("Incorrect length for diff %d block %d; %d != %d", i, j, d[j].Size, test.d[j].Size)
-				}
-			}
-		}
-	}
-}
-
-func TestDiffEmpty(t *testing.T) {
-	emptyCases := []struct {
-		a    []protocol.BlockInfo
-		b    []protocol.BlockInfo
-		need int
-		have int
-	}{
-		{nil, nil, 0, 0},
-		{[]protocol.BlockInfo{{Offset: 3, Size: 1}}, nil, 0, 0},
-		{nil, []protocol.BlockInfo{{Offset: 3, Size: 1}}, 1, 0},
-	}
-	for _, emptyCase := range emptyCases {
-		h, n := BlockDiff(emptyCase.a, emptyCase.b)
-		if len(h) != emptyCase.have {
-			t.Errorf("incorrect have: %d != %d", len(h), emptyCase.have)
-		}
-		if len(n) != emptyCase.need {
-			t.Errorf("incorrect have: %d != %d", len(h), emptyCase.have)
-		}
-	}
-}
-
 func TestAdler32Variants(t *testing.T) {
 	// Verify that the two adler32 functions give matching results for a few
 	// different blocks of data.
@@ -187,7 +127,7 @@ func TestAdler32Variants(t *testing.T) {
 	}
 
 	// protocol block sized data
-	data := make([]byte, protocol.BlockSize)
+	data := make([]byte, protocol.MinBlockSize)
 	for i := 0; i < 5; i++ {
 		rand.Read(data)
 		if !checkFn(data) {
@@ -206,14 +146,13 @@ func TestAdler32Variants(t *testing.T) {
 
 	windowSize := 128
 
-	hf2.Reset()
-
 	hf3 := rollingAdler32.New()
 	hf3.Write(data[:windowSize])
 
 	for i := windowSize; i < len(data); i++ {
 		if i%windowSize == 0 {
 			// let the reference function catch up
+			hf2.Reset()
 			hf2.Write(data[i-windowSize : i])
 
 			// verify that they are in sync with the rolling function
@@ -226,5 +165,45 @@ func TestAdler32Variants(t *testing.T) {
 			}
 		}
 		hf3.Roll(data[i])
+	}
+}
+
+func BenchmarkValidate(b *testing.B) {
+	type block struct {
+		data     []byte
+		hash     [sha256.Size]byte
+		weakhash uint32
+	}
+	var blocks []block
+	const blocksPerType = 100
+
+	r := mrand.New(mrand.NewSource(0x136bea689e851))
+
+	// Valid blocks.
+	for i := 0; i < blocksPerType; i++ {
+		var b block
+		b.data = make([]byte, 128<<10)
+		r.Read(b.data[:])
+		b.hash = sha256.Sum256(b.data[:])
+		b.weakhash = origAdler32.Checksum(b.data[:])
+		blocks = append(blocks, b)
+	}
+	// Blocks where the hash matches, but the weakhash doesn't.
+	for i := 0; i < blocksPerType; i++ {
+		var b block
+		b.data = make([]byte, 128<<10)
+		r.Read(b.data[:])
+		b.hash = sha256.Sum256(b.data[:])
+		b.weakhash = 1 // Zeros causes Validate to skip the weakhash.
+		blocks = append(blocks, b)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		for _, b := range blocks {
+			Validate(b.data[:], b.hash[:], b.weakhash)
+		}
 	}
 }

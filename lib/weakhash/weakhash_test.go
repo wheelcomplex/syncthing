@@ -11,6 +11,8 @@ package weakhash
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -30,13 +32,15 @@ func TestFinder(t *testing.T) {
 	if _, err := f.Write(payload); err != nil {
 		t.Error(err)
 	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Error(err)
+	}
 
 	hashes := []uint32{65143183, 65798547}
-	finder, err := NewFinder(f.Name(), 4, hashes)
+	finder, err := NewFinder(context.Background(), f, 4, hashes)
 	if err != nil {
 		t.Error(err)
 	}
-	defer finder.Close()
 
 	expected := map[uint32][]int64{
 		65143183: {1, 27, 53, 79},

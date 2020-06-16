@@ -26,11 +26,7 @@ const (
 	benchmarkingDuration   = 150 * time.Millisecond
 	defaultImpl            = "crypto/sha256"
 	minioImpl              = "minio/sha256-simd"
-)
-
-const (
-	BlockSize = cryptoSha256.BlockSize
-	Size      = cryptoSha256.Size
+	Size                   = cryptoSha256.Size
 )
 
 // May be switched out for another implementation
@@ -55,17 +51,13 @@ func SelectAlgo() {
 		}
 
 	case "minio":
-		// When set to "minio", use that. Benchmark anyway to be able to
-		// present the difference.
-		benchmark()
+		// When set to "minio", use that.
 		selectMinio()
 
 	default:
 		// When set to anything else, such as "standard", use the default Go
-		// implementation. Benchmark that anyway, so we can report something
-		// useful in Report(). Make sure not to touch the minio
+		// implementation. Make sure not to touch the minio
 		// implementation as it may be disabled for incompatibility reasons.
-		cryptoPerf = cpuBenchOnce(benchmarkingIterations*benchmarkingDuration, cryptoSha256.New)
 	}
 
 	verifyCorrectness()
@@ -87,6 +79,10 @@ func Report() {
 		selectedRate = minioPerf
 		otherRate = cryptoPerf
 		otherImpl = defaultImpl
+	}
+
+	if selectedRate == 0 {
+		return
 	}
 
 	l.Infof("Single thread SHA256 performance is %s using %s (%s using %s).", formatRate(selectedRate), selectedImpl, formatRate(otherRate), otherImpl)

@@ -16,7 +16,7 @@ import (
 )
 
 func TestBenchmarkTransferManyFiles(t *testing.T) {
-	benchmarkTransfer(t, 50000, 15)
+	benchmarkTransfer(t, 10000, 15)
 }
 
 func TestBenchmarkTransferLargeFile1G(t *testing.T) {
@@ -83,8 +83,13 @@ func benchmarkTransfer(t *testing.T, files, sizeExp int) {
 	receiver := startInstance(t, 2)
 	defer checkedStop(t, receiver)
 
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
 	var t0, t1 time.Time
 	lastEvent := 0
+	oneItemFinished := false
+
 loop:
 	for {
 		evs, err := receiver.Events(lastEvent)
@@ -96,22 +101,34 @@ loop:
 		}
 
 		for _, ev := range evs {
-			if ev.Type == "StateChanged" {
+			lastEvent = ev.ID
+
+			switch ev.Type {
+			case "ItemFinished":
+				oneItemFinished = true
+				continue
+
+			case "StateChanged":
 				data := ev.Data.(map[string]interface{})
 				if data["folder"].(string) != "default" {
 					continue
 				}
-				log.Println(ev)
-				if data["to"].(string) == "syncing" {
+
+				switch data["to"].(string) {
+				case "syncing":
 					t0 = ev.Time
 					continue
-				}
-				if !t0.IsZero() && data["to"].(string) == "idle" {
-					t1 = ev.Time
-					break loop
+
+				case "idle":
+					if !oneItemFinished {
+						continue
+					}
+					if !t0.IsZero() {
+						t1 = ev.Time
+						break loop
+					}
 				}
 			}
-			lastEvent = ev.ID
 		}
 
 		time.Sleep(250 * time.Millisecond)
@@ -137,9 +154,9 @@ loop:
 		t.Fatal(err)
 	}
 
-	log.Println("Result: Wall time:", t1.Sub(t0))
-	log.Printf("Result: %.1f MiB/s synced", float64(total)/1024/1024/t1.Sub(t0).Seconds())
+	log.Printf("Result: Wall time: %v / MiB", t1.Sub(t0)/time.Duration(total/1024/1024))
+	log.Printf("Result: %.3g KiB/s synced", float64(total)/1024/t1.Sub(t0).Seconds())
 
-	printUsage("Receiver", recvProc)
-	printUsage("Sender", sendProc)
+	printUsage("Receiver", recvProc, total)
+	printUsage("Sender", sendProc, total)
 }

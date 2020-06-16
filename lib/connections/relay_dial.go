@@ -7,6 +7,7 @@
 package connections
 
 import (
+	"context"
 	"crypto/tls"
 	"net/url"
 	"time"
@@ -17,22 +18,23 @@ import (
 	"github.com/syncthing/syncthing/lib/relay/client"
 )
 
+const relayPriority = 200
+
 func init() {
 	dialers["relay"] = relayDialerFactory{}
 }
 
 type relayDialer struct {
-	cfg    *config.Wrapper
-	tlsCfg *tls.Config
+	commonDialer
 }
 
-func (d *relayDialer) Dial(id protocol.DeviceID, uri *url.URL) (internalConn, error) {
-	inv, err := client.GetInvitationFromRelay(uri, id, d.tlsCfg.Certificates, 10*time.Second)
+func (d *relayDialer) Dial(ctx context.Context, id protocol.DeviceID, uri *url.URL) (internalConn, error) {
+	inv, err := client.GetInvitationFromRelay(ctx, uri, id, d.tlsCfg.Certificates, 10*time.Second)
 	if err != nil {
 		return internalConn{}, err
 	}
 
-	conn, err := client.JoinSession(inv)
+	conn, err := client.JoinSession(ctx, inv)
 	if err != nil {
 		return internalConn{}, err
 	}
@@ -43,9 +45,9 @@ func (d *relayDialer) Dial(id protocol.DeviceID, uri *url.URL) (internalConn, er
 		return internalConn{}, err
 	}
 
-	err = dialer.SetTrafficClass(conn, d.cfg.Options().TrafficClass)
+	err = dialer.SetTrafficClass(conn, d.trafficClass)
 	if err != nil {
-		l.Debugf("failed to set traffic class: %s", err)
+		l.Debugln("Dial (BEP/relay): setting traffic class:", err)
 	}
 
 	var tc *tls.Conn
@@ -64,29 +66,29 @@ func (d *relayDialer) Dial(id protocol.DeviceID, uri *url.URL) (internalConn, er
 	return internalConn{tc, connTypeRelayClient, relayPriority}, nil
 }
 
-func (relayDialer) Priority() int {
-	return relayPriority
-}
-
-func (d *relayDialer) RedialFrequency() time.Duration {
-	return time.Duration(d.cfg.Options().RelayReconnectIntervalM) * time.Minute
-}
-
 type relayDialerFactory struct{}
 
-func (relayDialerFactory) New(cfg *config.Wrapper, tlsCfg *tls.Config) genericDialer {
-	return &relayDialer{
-		cfg:    cfg,
-		tlsCfg: tlsCfg,
-	}
+func (relayDialerFactory) New(opts config.OptionsConfiguration, tlsCfg *tls.Config) genericDialer {
+	return &relayDialer{commonDialer{
+		trafficClass:      opts.TrafficClass,
+		reconnectInterval: time.Duration(opts.RelayReconnectIntervalM) * time.Minute,
+		tlsCfg:            tlsCfg,
+	}}
 }
 
 func (relayDialerFactory) Priority() int {
 	return relayPriority
 }
 
-func (relayDialerFactory) Enabled(cfg config.Configuration) bool {
-	return cfg.Options.RelaysEnabled
+func (relayDialerFactory) AlwaysWAN() bool {
+	return true
+}
+
+func (relayDialerFactory) Valid(cfg config.Configuration) error {
+	if !cfg.Options.RelaysEnabled {
+		return errDisabled
+	}
+	return nil
 }
 
 func (relayDialerFactory) String() string {

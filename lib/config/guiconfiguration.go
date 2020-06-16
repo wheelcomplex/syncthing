@@ -9,20 +9,32 @@ package config
 import (
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type GUIConfiguration struct {
-	Enabled               bool   `xml:"enabled,attr" json:"enabled" default:"true"`
-	RawAddress            string `xml:"address" json:"address" default:"127.0.0.1:8384"`
-	User                  string `xml:"user,omitempty" json:"user"`
-	Password              string `xml:"password,omitempty" json:"password"`
-	RawUseTLS             bool   `xml:"tls,attr" json:"useTLS"`
-	APIKey                string `xml:"apikey,omitempty" json:"apiKey"`
-	InsecureAdminAccess   bool   `xml:"insecureAdminAccess,omitempty" json:"insecureAdminAccess"`
-	Theme                 string `xml:"theme" json:"theme" default:"default"`
-	Debugging             bool   `xml:"debugging,attr" json:"debugging"`
-	InsecureSkipHostCheck bool   `xml:"insecureSkipHostcheck,omitempty" json:"insecureSkipHostcheck"`
+	Enabled                   bool     `xml:"enabled,attr" json:"enabled" default:"true"`
+	RawAddress                string   `xml:"address" json:"address" default:"127.0.0.1:8384"`
+	RawUnixSocketPermissions  string   `xml:"unixSocketPermissions,omitempty" json:"unixSocketPermissions"`
+	User                      string   `xml:"user,omitempty" json:"user"`
+	Password                  string   `xml:"password,omitempty" json:"password"`
+	AuthMode                  AuthMode `xml:"authMode,omitempty" json:"authMode"`
+	RawUseTLS                 bool     `xml:"tls,attr" json:"useTLS"`
+	APIKey                    string   `xml:"apikey,omitempty" json:"apiKey"`
+	InsecureAdminAccess       bool     `xml:"insecureAdminAccess,omitempty" json:"insecureAdminAccess"`
+	Theme                     string   `xml:"theme" json:"theme" default:"default"`
+	Debugging                 bool     `xml:"debugging,attr" json:"debugging"`
+	InsecureSkipHostCheck     bool     `xml:"insecureSkipHostcheck,omitempty" json:"insecureSkipHostcheck"`
+	InsecureAllowFrameLoading bool     `xml:"insecureAllowFrameLoading,omitempty" json:"insecureAllowFrameLoading"`
+}
+
+func (c GUIConfiguration) IsAuthEnabled() bool {
+	return c.AuthMode == AuthModeLDAP || (len(c.User) > 0 && len(c.Password) > 0)
+}
+
+func (c GUIConfiguration) IsOverridden() bool {
+	return os.Getenv("STGUIADDRESS") != ""
 }
 
 func (c GUIConfiguration) Address() string {
@@ -37,6 +49,9 @@ func (c GUIConfiguration) Address() string {
 			if err != nil {
 				return override
 			}
+			if strings.HasPrefix(url.Scheme, "unix") {
+				return url.Path
+			}
 			return url.Host
 		}
 
@@ -46,14 +61,48 @@ func (c GUIConfiguration) Address() string {
 	return c.RawAddress
 }
 
+func (c GUIConfiguration) UnixSocketPermissions() os.FileMode {
+	perm, err := strconv.ParseUint(c.RawUnixSocketPermissions, 8, 32)
+	if err != nil {
+		// ignore incorrectly formatted permissions
+		return 0
+	}
+	return os.FileMode(perm) & os.ModePerm
+}
+
+func (c GUIConfiguration) Network() string {
+	if override := os.Getenv("STGUIADDRESS"); strings.Contains(override, "/") {
+		url, err := url.Parse(override)
+		if err != nil {
+			return "tcp"
+		}
+		if strings.HasPrefix(url.Scheme, "unix") {
+			return "unix"
+		}
+	}
+	if strings.HasPrefix(c.RawAddress, "/") {
+		return "unix"
+	}
+	return "tcp"
+}
+
 func (c GUIConfiguration) UseTLS() bool {
-	if override := os.Getenv("STGUIADDRESS"); override != "" && strings.HasPrefix(override, "http") {
-		return strings.HasPrefix(override, "https:")
+	if override := os.Getenv("STGUIADDRESS"); override != "" {
+		if strings.HasPrefix(override, "http") {
+			return strings.HasPrefix(override, "https:")
+		}
+		if strings.HasPrefix(override, "unix") {
+			return strings.HasPrefix(override, "unixs:")
+		}
 	}
 	return c.RawUseTLS
 }
 
 func (c GUIConfiguration) URL() string {
+	if strings.HasPrefix(c.RawAddress, "/") {
+		return "unix://" + c.RawAddress
+	}
+
 	u := url.URL{
 		Scheme: "http",
 		Host:   c.Address(),
@@ -91,4 +140,8 @@ func (c GUIConfiguration) IsValidAPIKey(apiKey string) bool {
 	default:
 		return false
 	}
+}
+
+func (c GUIConfiguration) Copy() GUIConfiguration {
+	return c
 }

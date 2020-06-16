@@ -7,7 +7,9 @@
 package model
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -29,7 +31,7 @@ func caller(skip int) string {
 	return fmt.Sprintf("%s:%d", filepath.Base(file), line)
 }
 
-func expectEvent(w *events.Subscription, t *testing.T, size int) {
+func expectEvent(w events.Subscription, t *testing.T, size int) {
 	event, err := w.Poll(timeout)
 	if err != nil {
 		t.Fatal("Unexpected error:", err, "at", caller(1))
@@ -43,7 +45,7 @@ func expectEvent(w *events.Subscription, t *testing.T, size int) {
 	}
 }
 
-func expectTimeout(w *events.Subscription, t *testing.T) {
+func expectTimeout(w events.Subscription, t *testing.T) {
 	_, err := w.Poll(timeout)
 	if err != events.ErrTimeout {
 		t.Fatal("Unexpected non-Timeout error:", err, "at", caller(1))
@@ -51,15 +53,21 @@ func expectTimeout(w *events.Subscription, t *testing.T) {
 }
 
 func TestProgressEmitter(t *testing.T) {
-	w := events.Default.Subscribe(events.DownloadProgress)
+	evLogger := events.NewLogger()
+	go evLogger.Serve()
+	defer evLogger.Stop()
 
-	c := config.Wrap("/tmp/test", config.Configuration{})
+	w := evLogger.Subscribe(events.DownloadProgress)
+
+	c := createTmpWrapper(config.Configuration{})
+	defer os.Remove(c.ConfigPath())
 	c.SetOptions(config.OptionsConfiguration{
-		ProgressUpdateIntervalS: 0,
+		ProgressUpdateIntervalS: 60, // irrelevant, but must be positive
 	})
 
-	p := NewProgressEmitter(c)
+	p := NewProgressEmitter(c, evLogger)
 	go p.Serve()
+	defer p.Stop()
 	p.interval = 0
 
 	expectTimeout(w, t)
@@ -101,16 +109,24 @@ func TestProgressEmitter(t *testing.T) {
 }
 
 func TestSendDownloadProgressMessages(t *testing.T) {
-	c := config.Wrap("/tmp/test", config.Configuration{})
+	c := createTmpWrapper(config.Configuration{})
+	defer os.Remove(c.ConfigPath())
 	c.SetOptions(config.OptionsConfiguration{
-		ProgressUpdateIntervalS: 0,
+		ProgressUpdateIntervalS: 60, // irrelevant, but must be positive
 		TempIndexMinBlocks:      10,
 	})
 
 	fc := &fakeConnection{}
 
-	p := NewProgressEmitter(c)
+	evLogger := events.NewLogger()
+	go evLogger.Serve()
+	defer evLogger.Stop()
+
+	p := NewProgressEmitter(c, evLogger)
 	p.temporaryIndexSubscribe(fc, []string{"folder", "folder2"})
+	p.registry["folder"] = make(map[string]*sharedPullerState)
+	p.registry["folder2"] = make(map[string]*sharedPullerState)
+	p.registry["folderXXX"] = make(map[string]*sharedPullerState)
 
 	expect := func(updateIdx int, state *sharedPullerState, updateType protocol.FileDownloadProgressUpdateType, version protocol.Vector, blocks []int32, remove bool) {
 		messageIdx := -1
@@ -187,7 +203,7 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	v2 := (protocol.Vector{}).Update(1)
 
 	// Requires more than 10 blocks to work.
-	blocks := make([]protocol.BlockInfo, 11, 11)
+	blocks := make([]protocol.BlockInfo, 11)
 
 	state1 := &sharedPullerState{
 		folder: "folder",
@@ -199,39 +215,39 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 		mut:              sync.NewRWMutex(),
 		availableUpdated: time.Now(),
 	}
-	p.registry["1"] = state1
+	p.registry["folder"]["1"] = state1
 
 	// Has no blocks, hence no message is sent
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 	expectEmpty()
 
 	// Returns update for puller with new extra blocks
 	state1.available = []int32{1}
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(0, state1, protocol.UpdateTypeAppend, v1, []int32{1}, true)
 	expectEmpty()
 
 	// Does nothing if nothing changes
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 	expectEmpty()
 
 	// Does nothing if timestamp updated, but no new blocks (should never happen)
 	state1.availableUpdated = tick()
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 	expectEmpty()
 
 	// Does not return an update if date blocks change but date does not (should never happen)
 	state1.available = []int32{1, 2}
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 	expectEmpty()
 
 	// If the date and blocks changes, returns only the diff
 	state1.availableUpdated = tick()
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(0, state1, protocol.UpdateTypeAppend, v1, []int32{2}, true)
 	expectEmpty()
@@ -239,7 +255,7 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	// Returns forget and update if puller version has changed
 	state1.file.Version = v2
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(0, state1, protocol.UpdateTypeForget, v1, nil, false)
 	expect(1, state1, protocol.UpdateTypeAppend, v2, []int32{1, 2}, true)
@@ -251,7 +267,7 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	state1.availableUpdated = tick()
 	state1.created = tick()
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(0, state1, protocol.UpdateTypeForget, v2, nil, false)
 	expect(1, state1, protocol.UpdateTypeAppend, v2, []int32{1}, true)
@@ -262,7 +278,7 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	state1.available = nil
 	state1.availableUpdated = tick()
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(0, state1, protocol.UpdateTypeForget, v2, nil, false)
 	expect(1, state1, protocol.UpdateTypeAppend, v1, nil, true)
@@ -305,11 +321,11 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 		available:        []int32{1, 2, 3},
 		availableUpdated: time.Now(),
 	}
-	p.registry["2"] = state2
-	p.registry["3"] = state3
-	p.registry["4"] = state4
+	p.registry["folder2"]["2"] = state2
+	p.registry["folder"]["3"] = state3
+	p.registry["folder2"]["4"] = state4
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(-1, state1, protocol.UpdateTypeAppend, v1, []int32{1, 2, 3}, false)
 	expect(-1, state3, protocol.UpdateTypeAppend, v1, []int32{1, 2, 3}, true)
@@ -323,10 +339,10 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	state2.available = []int32{1, 2, 3, 4, 5}
 	state2.availableUpdated = tick()
 
-	delete(p.registry, "3")
-	delete(p.registry, "4")
+	delete(p.registry["folder"], "3")
+	delete(p.registry["folder2"], "4")
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(-1, state1, protocol.UpdateTypeAppend, v1, []int32{4, 5}, false)
 	expect(-1, state3, protocol.UpdateTypeForget, v1, nil, true)
@@ -335,8 +351,8 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	expectEmpty()
 
 	// Deletions are sent only once (actual bug I found writing the tests)
-	p.sendDownloadProgressMessages()
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
+	sendMsgs(p)
 	expectEmpty()
 
 	// Not sent for "inactive" (symlinks, dirs, or wrong folder) pullers
@@ -389,31 +405,31 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 		available:        []int32{1, 2, 3},
 		availableUpdated: time.Now(),
 	}
-	p.registry["5"] = state5
-	p.registry["6"] = state6
-	p.registry["7"] = state7
-	p.registry["8"] = state8
+	p.registry["folder"]["5"] = state5
+	p.registry["folder"]["6"] = state6
+	p.registry["folderXXX"]["7"] = state7
+	p.registry["folder"]["8"] = state8
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expectEmpty()
 
 	// Device is no longer subscribed to a particular folder
-	delete(p.registry, "1") // Clean up first
-	delete(p.registry, "2") // Clean up first
+	delete(p.registry["folder"], "1")  // Clean up first
+	delete(p.registry["folder2"], "2") // Clean up first
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 	expect(-1, state1, protocol.UpdateTypeForget, v1, nil, true)
 	expect(-1, state2, protocol.UpdateTypeForget, v1, nil, true)
 
 	expectEmpty()
 
-	p.registry["1"] = state1
-	p.registry["2"] = state2
-	p.registry["3"] = state3
-	p.registry["4"] = state4
+	p.registry["folder"]["1"] = state1
+	p.registry["folder2"]["2"] = state2
+	p.registry["folder"]["3"] = state3
+	p.registry["folder2"]["4"] = state4
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	expect(-1, state1, protocol.UpdateTypeAppend, v1, []int32{1, 2, 3, 4, 5}, false)
 	expect(-1, state3, protocol.UpdateTypeAppend, v1, []int32{1, 2, 3}, true)
@@ -424,7 +440,7 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	p.temporaryIndexUnsubscribe(fc)
 	p.temporaryIndexSubscribe(fc, []string{"folder"})
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 
 	// See progressemitter.go for explanation why this is commented out.
 	// Search for state.cleanup
@@ -436,9 +452,19 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	// Cleanup when device no longer exists
 	p.temporaryIndexUnsubscribe(fc)
 
-	p.sendDownloadProgressMessages()
+	sendMsgs(p)
 	_, ok := p.sentDownloadStates[fc.ID()]
 	if ok {
 		t.Error("Should not be there")
+	}
+}
+
+func sendMsgs(p *ProgressEmitter) {
+	p.mut.Lock()
+	updates := p.computeProgressUpdates()
+	p.mut.Unlock()
+	ctx := context.Background()
+	for _, update := range updates {
+		update.send(ctx)
 	}
 }

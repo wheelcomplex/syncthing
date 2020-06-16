@@ -7,46 +7,66 @@
 package config
 
 import (
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
-	"github.com/syncthing/syncthing/lib/osutil"
+	"github.com/shirou/gopsutil/disk"
+
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/util"
 )
 
-type FolderConfiguration struct {
-	ID                    string                      `xml:"id,attr" json:"id"`
-	Label                 string                      `xml:"label,attr" json:"label"`
-	RawPath               string                      `xml:"path,attr" json:"path"`
-	Type                  FolderType                  `xml:"type,attr" json:"type"`
-	Devices               []FolderDeviceConfiguration `xml:"device" json:"devices"`
-	RescanIntervalS       int                         `xml:"rescanIntervalS,attr" json:"rescanIntervalS"`
-	IgnorePerms           bool                        `xml:"ignorePerms,attr" json:"ignorePerms"`
-	AutoNormalize         bool                        `xml:"autoNormalize,attr" json:"autoNormalize"`
-	MinDiskFree           Size                        `xml:"minDiskFree" json:"minDiskFree"`
-	Versioning            VersioningConfiguration     `xml:"versioning" json:"versioning"`
-	Copiers               int                         `xml:"copiers" json:"copiers"` // This defines how many files are handled concurrently.
-	Pullers               int                         `xml:"pullers" json:"pullers"` // Defines how many blocks are fetched at the same time, possibly between separate copier routines.
-	Hashers               int                         `xml:"hashers" json:"hashers"` // Less than one sets the value to the number of cores. These are CPU bound due to hashing.
-	Order                 PullOrder                   `xml:"order" json:"order"`
-	IgnoreDelete          bool                        `xml:"ignoreDelete" json:"ignoreDelete"`
-	ScanProgressIntervalS int                         `xml:"scanProgressIntervalS" json:"scanProgressIntervalS"` // Set to a negative value to disable. Value of 0 will get replaced with value of 2 (default value)
-	PullerSleepS          int                         `xml:"pullerSleepS" json:"pullerSleepS"`
-	PullerPauseS          int                         `xml:"pullerPauseS" json:"pullerPauseS"`
-	MaxConflicts          int                         `xml:"maxConflicts" json:"maxConflicts"`
-	DisableSparseFiles    bool                        `xml:"disableSparseFiles" json:"disableSparseFiles"`
-	DisableTempIndexes    bool                        `xml:"disableTempIndexes" json:"disableTempIndexes"`
-	Fsync                 bool                        `xml:"fsync" json:"fsync"`
-	Paused                bool                        `xml:"paused" json:"paused"`
-	WeakHashThresholdPct  int                         `xml:"weakHashThresholdPct" json:"weakHashThresholdPct"` // Use weak hash if more than X percent of the file has changed. Set to -1 to always use weak hash.
+var (
+	ErrPathNotDirectory = errors.New("folder path not a directory")
+	ErrPathMissing      = errors.New("folder path missing")
+	ErrMarkerMissing    = errors.New("folder marker missing (this indicates potential data loss, search docs/forum to get information about how to proceed)")
+)
 
-	cachedPath string
+const DefaultMarkerName = ".stfolder"
+
+type FolderConfiguration struct {
+	ID                      string                      `xml:"id,attr" json:"id"`
+	Label                   string                      `xml:"label,attr" json:"label" restart:"false"`
+	FilesystemType          fs.FilesystemType           `xml:"filesystemType" json:"filesystemType"`
+	Path                    string                      `xml:"path,attr" json:"path"`
+	Type                    FolderType                  `xml:"type,attr" json:"type"`
+	Devices                 []FolderDeviceConfiguration `xml:"device" json:"devices"`
+	RescanIntervalS         int                         `xml:"rescanIntervalS,attr" json:"rescanIntervalS" default:"3600"`
+	FSWatcherEnabled        bool                        `xml:"fsWatcherEnabled,attr" json:"fsWatcherEnabled" default:"true"`
+	FSWatcherDelayS         int                         `xml:"fsWatcherDelayS,attr" json:"fsWatcherDelayS" default:"10"`
+	IgnorePerms             bool                        `xml:"ignorePerms,attr" json:"ignorePerms"`
+	AutoNormalize           bool                        `xml:"autoNormalize,attr" json:"autoNormalize" default:"true"`
+	MinDiskFree             Size                        `xml:"minDiskFree" json:"minDiskFree" default:"1%"`
+	Versioning              VersioningConfiguration     `xml:"versioning" json:"versioning"`
+	Copiers                 int                         `xml:"copiers" json:"copiers"` // This defines how many files are handled concurrently.
+	PullerMaxPendingKiB     int                         `xml:"pullerMaxPendingKiB" json:"pullerMaxPendingKiB"`
+	Hashers                 int                         `xml:"hashers" json:"hashers"` // Less than one sets the value to the number of cores. These are CPU bound due to hashing.
+	Order                   PullOrder                   `xml:"order" json:"order"`
+	IgnoreDelete            bool                        `xml:"ignoreDelete" json:"ignoreDelete"`
+	ScanProgressIntervalS   int                         `xml:"scanProgressIntervalS" json:"scanProgressIntervalS"` // Set to a negative value to disable. Value of 0 will get replaced with value of 2 (default value)
+	PullerPauseS            int                         `xml:"pullerPauseS" json:"pullerPauseS"`
+	MaxConflicts            int                         `xml:"maxConflicts" json:"maxConflicts" default:"-1"`
+	DisableSparseFiles      bool                        `xml:"disableSparseFiles" json:"disableSparseFiles"`
+	DisableTempIndexes      bool                        `xml:"disableTempIndexes" json:"disableTempIndexes"`
+	Paused                  bool                        `xml:"paused" json:"paused"`
+	WeakHashThresholdPct    int                         `xml:"weakHashThresholdPct" json:"weakHashThresholdPct"` // Use weak hash if more than X percent of the file has changed. Set to -1 to always use weak hash.
+	MarkerName              string                      `xml:"markerName" json:"markerName"`
+	CopyOwnershipFromParent bool                        `xml:"copyOwnershipFromParent" json:"copyOwnershipFromParent"`
+	RawModTimeWindowS       int                         `xml:"modTimeWindowS" json:"modTimeWindowS"`
+	MaxConcurrentWrites     int                         `xml:"maxConcurrentWrites" json:"maxConcurrentWrites" default:"2"`
+	DisableFsync            bool                        `xml:"disableFsync" json:"disableFsync"`
+	BlockPullOrder          BlockPullOrder              `xml:"blockPullOrder" json:"blockPullOrder"`
+
+	cachedFilesystem    fs.Filesystem
+	cachedModTimeWindow time.Duration
 
 	DeprecatedReadOnly       bool    `xml:"ro,attr,omitempty" json:"-"`
 	DeprecatedMinDiskFreePct float64 `xml:"minDiskFreePct,omitempty" json:"-"`
+	DeprecatedPullers        int     `xml:"pullers,omitempty" json:"-"`
 }
 
 type FolderDeviceConfiguration struct {
@@ -54,11 +74,17 @@ type FolderDeviceConfiguration struct {
 	IntroducedBy protocol.DeviceID `xml:"introducedBy,attr" json:"introducedBy"`
 }
 
-func NewFolderConfiguration(id, path string) FolderConfiguration {
+func NewFolderConfiguration(myID protocol.DeviceID, id, label string, fsType fs.FilesystemType, path string) FolderConfiguration {
 	f := FolderConfiguration{
-		ID:      id,
-		RawPath: path,
+		ID:             id,
+		Label:          label,
+		Devices:        []FolderDeviceConfiguration{{DeviceID: myID}},
+		FilesystemType: fsType,
+		Path:           path,
 	}
+
+	util.SetDefaults(&f)
+
 	f.prepare()
 	return f
 }
@@ -71,54 +97,97 @@ func (f FolderConfiguration) Copy() FolderConfiguration {
 	return c
 }
 
-func (f FolderConfiguration) Path() string {
+func (f FolderConfiguration) Filesystem() fs.Filesystem {
 	// This is intentionally not a pointer method, because things like
-	// cfg.Folders["default"].Path() should be valid.
-
-	if f.cachedPath == "" && f.RawPath != "" {
-		l.Infoln("bug: uncached path call (should only happen in tests)")
-		return f.cleanedPath()
+	// cfg.Folders["default"].Filesystem() should be valid.
+	if f.cachedFilesystem == nil {
+		l.Infoln("bug: uncached filesystem call (should only happen in tests)")
+		return fs.NewFilesystem(f.FilesystemType, f.Path)
 	}
-	return f.cachedPath
+	return f.cachedFilesystem
+}
+
+func (f FolderConfiguration) ModTimeWindow() time.Duration {
+	return f.cachedModTimeWindow
 }
 
 func (f *FolderConfiguration) CreateMarker() error {
-	if !f.HasMarker() {
-		marker := filepath.Join(f.Path(), ".stfolder")
-		fd, err := os.Create(marker)
-		if err != nil {
+	if err := f.CheckPath(); err != ErrMarkerMissing {
+		return err
+	}
+	if f.MarkerName != DefaultMarkerName {
+		// Folder uses a non-default marker so we shouldn't mess with it.
+		// Pretend we created it and let the subsequent health checks sort
+		// out the actual situation.
+		return nil
+	}
+
+	permBits := fs.FileMode(0777)
+	if runtime.GOOS == "windows" {
+		// Windows has no umask so we must chose a safer set of bits to
+		// begin with.
+		permBits = 0700
+	}
+	fs := f.Filesystem()
+	err := fs.Mkdir(DefaultMarkerName, permBits)
+	if err != nil {
+		return err
+	}
+	if dir, err := fs.Open("."); err != nil {
+		l.Debugln("folder marker: open . failed:", err)
+	} else if err := dir.Sync(); err != nil {
+		l.Debugln("folder marker: fsync . failed:", err)
+	}
+	fs.Hide(DefaultMarkerName)
+
+	return nil
+}
+
+// CheckPath returns nil if the folder root exists and contains the marker file
+func (f *FolderConfiguration) CheckPath() error {
+	fi, err := f.Filesystem().Stat(".")
+	if err != nil {
+		if !fs.IsNotExist(err) {
 			return err
 		}
-		fd.Close()
-		if err := osutil.SyncDir(filepath.Dir(marker)); err != nil {
-			l.Infof("fsync %q failed: %v", filepath.Dir(marker), err)
+		return ErrPathMissing
+	}
+
+	// Users might have the root directory as a symlink or reparse point.
+	// Furthermore, OneDrive bullcrap uses a magic reparse point to the cloudz...
+	// Yet it's impossible for this to happen, as filesystem adds a trailing
+	// path separator to the root, so even if you point the filesystem at a file
+	// Stat ends up calling stat on C:\dir\file\ which, fails with "is not a directory"
+	// in the error check above, and we don't even get to here.
+	if !fi.IsDir() && !fi.IsSymlink() {
+		return ErrPathNotDirectory
+	}
+
+	_, err = f.Filesystem().Stat(f.MarkerName)
+	if err != nil {
+		if !fs.IsNotExist(err) {
+			return err
 		}
-		osutil.HideFile(marker)
+		return ErrMarkerMissing
 	}
 
 	return nil
 }
 
-func (f *FolderConfiguration) HasMarker() bool {
-	_, err := os.Stat(filepath.Join(f.Path(), ".stfolder"))
-	return err == nil
-}
-
 func (f *FolderConfiguration) CreateRoot() (err error) {
 	// Directory permission bits. Will be filtered down to something
 	// sane by umask on Unixes.
-	permBits := os.FileMode(0777)
+	permBits := fs.FileMode(0777)
 	if runtime.GOOS == "windows" {
 		// Windows has no umask so we must chose a safer set of bits to
 		// begin with.
 		permBits = 0700
 	}
 
-	if _, err = os.Stat(f.Path()); os.IsNotExist(err) {
-		if err = osutil.MkdirAll(f.Path(), permBits); err != nil {
-			l.Warnf("Creating directory for %v: %v",
-				f.Description(), err)
-		}
+	filesystem := f.Filesystem()
+
+	if _, err = filesystem.Stat("."); fs.IsNotExist(err) {
+		err = filesystem.MkdirAll(".", permBits)
 	}
 
 	return err
@@ -140,28 +209,17 @@ func (f *FolderConfiguration) DeviceIDs() []protocol.DeviceID {
 }
 
 func (f *FolderConfiguration) prepare() {
-	if f.RawPath != "" {
-		// The reason it's done like this:
-		// C:          ->  C:\            ->  C:\        (issue that this is trying to fix)
-		// C:\somedir  ->  C:\somedir\    ->  C:\somedir
-		// C:\somedir\ ->  C:\somedir\\   ->  C:\somedir
-		// This way in the tests, we get away without OS specific separators
-		// in the test configs.
-		f.RawPath = filepath.Dir(f.RawPath + string(filepath.Separator))
-
-		// If we're not on Windows, we want the path to end with a slash to
-		// penetrate symlinks. On Windows, paths must not end with a slash.
-		if runtime.GOOS != "windows" && f.RawPath[len(f.RawPath)-1] != filepath.Separator {
-			f.RawPath = f.RawPath + string(filepath.Separator)
-		}
-	}
-
-	f.cachedPath = f.cleanedPath()
+	f.cachedFilesystem = fs.NewFilesystem(f.FilesystemType, f.Path)
 
 	if f.RescanIntervalS > MaxRescanIntervalS {
 		f.RescanIntervalS = MaxRescanIntervalS
 	} else if f.RescanIntervalS < 0 {
 		f.RescanIntervalS = 0
+	}
+
+	if f.FSWatcherDelayS <= 0 {
+		f.FSWatcherEnabled = false
+		f.FSWatcherDelayS = 10
 	}
 
 	if f.Versioning.Params == nil {
@@ -171,55 +229,70 @@ func (f *FolderConfiguration) prepare() {
 	if f.WeakHashThresholdPct == 0 {
 		f.WeakHashThresholdPct = 25
 	}
-}
 
-func (f *FolderConfiguration) cleanedPath() string {
-	if f.RawPath == "" {
-		return ""
+	if f.MarkerName == "" {
+		f.MarkerName = DefaultMarkerName
 	}
 
-	cleaned := f.RawPath
-
-	// Attempt tilde expansion; leave unchanged in case of error
-	if path, err := osutil.ExpandTilde(cleaned); err == nil {
-		cleaned = path
-	}
-
-	// Attempt absolutification; leave unchanged in case of error
-	if !filepath.IsAbs(cleaned) {
-		// Abs() looks like a fairly expensive syscall on Windows, while
-		// IsAbs() is a whole bunch of string mangling. I think IsAbs() may be
-		// somewhat faster in the general case, hence the outer if...
-		if path, err := filepath.Abs(cleaned); err == nil {
-			cleaned = path
+	switch {
+	case f.RawModTimeWindowS > 0:
+		f.cachedModTimeWindow = time.Duration(f.RawModTimeWindowS) * time.Second
+	case runtime.GOOS == "android":
+		if usage, err := disk.Usage(f.Filesystem().URI()); err != nil {
+			f.cachedModTimeWindow = 2 * time.Second
+			l.Debugf(`Detecting FS at "%v" on android: Setting mtime window to 2s: err == "%v"`, f.Path, err)
+		} else if usage.Fstype == "" || strings.Contains(strings.ToLower(usage.Fstype), "fat") {
+			f.cachedModTimeWindow = 2 * time.Second
+			l.Debugf(`Detecting FS at "%v" on android: Setting mtime window to 2s: usage.Fstype == "%v"`, f.Path, usage.Fstype)
+		} else {
+			l.Debugf(`Detecting FS at %v on android: Leaving mtime window at 0: usage.Fstype == "%v"`, f.Path, usage.Fstype)
 		}
 	}
+}
 
-	// Attempt to enable long filename support on Windows. We may still not
-	// have an absolute path here if the previous steps failed.
-	if runtime.GOOS == "windows" && filepath.IsAbs(cleaned) && !strings.HasPrefix(f.RawPath, `\\`) {
-		return `\\?\` + cleaned
+// RequiresRestartOnly returns a copy with only the attributes that require
+// restart on change.
+func (f FolderConfiguration) RequiresRestartOnly() FolderConfiguration {
+	copy := f
+
+	// Manual handling for things that are not taken care of by the tag
+	// copier, yet should not cause a restart.
+	copy.cachedFilesystem = nil
+
+	blank := FolderConfiguration{}
+	util.CopyMatchingTag(&blank, &copy, "restart", func(v string) bool {
+		if len(v) > 0 && v != "false" {
+			panic(fmt.Sprintf(`unexpected tag value: %s. expected untagged or "false"`, v))
+		}
+		return v == "false"
+	})
+	return copy
+}
+
+func (f *FolderConfiguration) SharedWith(device protocol.DeviceID) bool {
+	for _, dev := range f.Devices {
+		if dev.DeviceID == device {
+			return true
+		}
 	}
+	return false
+}
 
-	// If we're not on Windows, we want the path to end with a slash to
-	// penetrate symlinks. On Windows, paths must not end with a slash.
-	if runtime.GOOS != "windows" && cleaned[len(cleaned)-1] != filepath.Separator {
-		cleaned = cleaned + string(filepath.Separator)
+func (f *FolderConfiguration) CheckAvailableSpace(req int64) error {
+	val := f.MinDiskFree.BaseValue()
+	if val <= 0 {
+		return nil
 	}
-
-	return cleaned
-}
-
-type FolderDeviceConfigurationList []FolderDeviceConfiguration
-
-func (l FolderDeviceConfigurationList) Less(a, b int) bool {
-	return l[a].DeviceID.Compare(l[b].DeviceID) == -1
-}
-
-func (l FolderDeviceConfigurationList) Swap(a, b int) {
-	l[a], l[b] = l[b], l[a]
-}
-
-func (l FolderDeviceConfigurationList) Len() int {
-	return len(l)
+	fs := f.Filesystem()
+	usage, err := fs.Usage(".")
+	if err != nil {
+		return nil
+	}
+	usage.Free -= req
+	if usage.Free > 0 {
+		if err := CheckFreeSpace(f.MinDiskFree, usage); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("insufficient space in %v %v", fs.Type(), fs.URI())
 }

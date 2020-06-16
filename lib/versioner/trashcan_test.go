@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/syncthing/syncthing/lib/fs"
 )
 
 func TestTrashcanCleanout(t *testing.T) {
@@ -29,8 +31,10 @@ func TestTrashcanCleanout(t *testing.T) {
 		{"testdata/.stversions/keep1/file2", false},
 		{"testdata/.stversions/keep2/file1", false},
 		{"testdata/.stversions/keep2/file2", true},
+		{"testdata/.stversions/keep3/keepsubdir/file1", false},
 		{"testdata/.stversions/remove/file1", true},
 		{"testdata/.stversions/remove/file2", true},
+		{"testdata/.stversions/remove/removesubdir/file1", true},
 	}
 
 	os.RemoveAll("testdata")
@@ -49,7 +53,7 @@ func TestTrashcanCleanout(t *testing.T) {
 		}
 	}
 
-	versioner := NewTrashcan("default", "testdata", map[string]string{"cleanoutDays": "7"}).(*Trashcan)
+	versioner := newTrashcan(fs.NewFilesystem(fs.FilesystemTypeBasic, "testdata"), map[string]string{"cleanoutDays": "7"}).(*trashcan)
 	if err := versioner.cleanoutArchive(); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +67,116 @@ func TestTrashcanCleanout(t *testing.T) {
 		}
 	}
 
+	if _, err := os.Lstat("testdata/.stversions/keep3"); os.IsNotExist(err) {
+		t.Error("directory with non empty subdirs should not be removed")
+	}
+
 	if _, err := os.Lstat("testdata/.stversions/remove"); !os.IsNotExist(err) {
 		t.Error("empty directory should have been removed")
+	}
+}
+
+func TestTrashcanArchiveRestoreSwitcharoo(t *testing.T) {
+	// This tests that trashcan versioner restoration correctly archives existing file, because trashcan versioner
+	// files are untagged, archiving existing file to replace with a restored version technically should collide in
+	// in names.
+	tmpDir1, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir2, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	folderFs := fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir1)
+	versionsFs := fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir2)
+
+	writeFile(t, folderFs, "file", "A")
+
+	versioner := newTrashcan(folderFs, map[string]string{
+		"fsType": "basic",
+		"fsPath": tmpDir2,
+	})
+
+	if err := versioner.Archive("file"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := folderFs.Stat("file"); !fs.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	// Check versions
+	versions, err := versioner.GetVersions()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fileVersions := versions["file"]
+	if len(fileVersions) != 1 {
+		t.Fatalf("unexpected number of versions: %d != 1", len(fileVersions))
+	}
+
+	fileVersion := fileVersions[0]
+
+	if !fileVersion.ModTime.Equal(fileVersion.VersionTime) {
+		t.Error("time mismatch")
+	}
+
+	if content := readFile(t, versionsFs, "file"); content != "A" {
+		t.Errorf("expected A got %s", content)
+	}
+
+	writeFile(t, folderFs, "file", "B")
+
+	versionInfo, err := versionsFs.Stat("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !versionInfo.ModTime().Truncate(time.Second).Equal(fileVersion.ModTime) {
+		t.Error("time mismatch")
+	}
+
+	if err := versioner.Restore("file", fileVersion.VersionTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if content := readFile(t, folderFs, "file"); content != "A" {
+		t.Errorf("expected A got %s", content)
+	}
+
+	if content := readFile(t, versionsFs, "file"); content != "B" {
+		t.Errorf("expected B got %s", content)
+	}
+}
+
+func readFile(t *testing.T, filesystem fs.Filesystem, name string) string {
+	fd, err := filesystem.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	buf, err := ioutil.ReadAll(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(buf)
+}
+
+func writeFile(t *testing.T, filesystem fs.Filesystem, name, content string) {
+	fd, err := filesystem.OpenFile(name, fs.OptReadWrite|fs.OptCreate, 0777)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	if err := fd.Truncate(int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+
+	if n, err := fd.Write([]byte(content)); err != nil || n != len(content) {
+		t.Fatal(n, len(content), err)
 	}
 }

@@ -10,11 +10,14 @@ package integration
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReset(t *testing.T) {
@@ -74,6 +77,11 @@ func TestReset(t *testing.T) {
 	}
 
 	// ---- Syncthing exits here ----
+	select {
+	case <-p.Stopped():
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out before Syncthing stopped")
+	}
 
 	p = startInstance(t, 1)
 	defer p.Stop() // Not checkedStop, because Syncthing will exit on its own
@@ -113,6 +121,11 @@ func TestReset(t *testing.T) {
 	}
 
 	// ---- Syncthing exits here ----
+	select {
+	case <-p.Stopped():
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out before Syncthing stopped")
+	}
 
 	p = startInstance(t, 1)
 	defer checkedStop(t, p)
@@ -128,25 +141,15 @@ func TestReset(t *testing.T) {
 }
 
 func createFiles(t *testing.T) int {
-	// Create eight empty files and directories
-	files := []string{"f1", "f2", "f3", "f4", "f11", "f12", "f13", "f14"}
-	dirs := []string{"d1", "d2", "d3", "d4", "d11", "d12", "d13", "d14"}
-	all := append(files, dirs...)
+	// Create a few files
 
-	for _, file := range files {
-		fd, err := os.Create(filepath.Join("s1", file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		fd.Close()
-	}
-
-	for _, dir := range dirs {
-		err := os.Mkdir(filepath.Join("s1", dir), 0755)
-		if err != nil {
+	const n = 8
+	for i := 0; i < n; i++ {
+		file := fmt.Sprintf("f%d", i)
+		if err := ioutil.WriteFile(filepath.Join("s1", file), []byte("data"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	return len(all)
+	return n
 }

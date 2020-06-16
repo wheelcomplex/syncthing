@@ -26,7 +26,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/rc"
 )
 
@@ -95,7 +94,7 @@ func generateOneFile(fd io.ReadSeeker, p1 string, s int64) error {
 		return err
 	}
 
-	_ = os.Chmod(p1, os.FileMode(rand.Intn(0777)|0400))
+	os.Chmod(p1, os.FileMode(rand.Intn(0777)|0400))
 
 	t := time.Now().Add(-time.Duration(rand.Intn(30*86400)) * time.Second)
 	err = os.Chtimes(p1, t, t)
@@ -188,7 +187,7 @@ func alterFiles(dir string) error {
 			}
 			newPath := filepath.Join(filepath.Dir(path), string(base))
 			if newPath != path {
-				return osutil.TryRename(path, newPath)
+				return os.Rename(path, newPath)
 			}
 
 			/*
@@ -277,7 +276,7 @@ func (i *inifiteReader) Read(bs []byte) (int, error) {
 // rm -rf
 func removeAll(dirs ...string) error {
 	for _, dir := range dirs {
-		files, err := osutil.Glob(dir)
+		files, err := filepath.Glob(dir)
 		if err != nil {
 			return err
 		}
@@ -331,7 +330,7 @@ func compareDirectories(dirs ...string) error {
 		for i := 1; i < len(res); i++ {
 			if res[i] != res[0] {
 				close(abort)
-				return fmt.Errorf("Mismatch; %#v (%s) != %#v (%s)", res[i], dirs[i], res[0], dirs[0])
+				return fmt.Errorf("mismatch; %#v (%s) != %#v (%s)", res[i], dirs[i], res[0], dirs[0])
 			}
 		}
 
@@ -382,7 +381,7 @@ func compareDirectoryContents(actual, expected []fileInfo) error {
 
 	for i := range actual {
 		if actual[i] != expected[i] {
-			return fmt.Errorf("Mismatch; actual %#v != expected %#v", actual[i], expected[i])
+			return fmt.Errorf("mismatch; actual %#v != expected %#v", actual[i], expected[i])
 		}
 	}
 	return nil
@@ -454,7 +453,10 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 			f = fileInfo{
 				name: rn,
 				mode: info.Mode(),
-				mod:  info.ModTime().Truncate(time.Microsecond).UnixNano(),
+				// comparing timestamps with better precision than a second
+				// is problematic as there is rounding and truncatign going
+				// on at every level
+				mod:  info.ModTime().Unix(),
 				size: info.Size(),
 			}
 			sum, err := md5file(path)
@@ -504,7 +506,8 @@ func isTimeout(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "use of closed network connection") ||
-		strings.Contains(err.Error(), "request canceled while waiting")
+		strings.Contains(err.Error(), "request canceled while waiting") ||
+		strings.Contains(err.Error(), "operation timed out")
 }
 
 func getTestName() string {
@@ -542,6 +545,7 @@ func startInstance(t *testing.T, i int) *rc.Process {
 		t.Fatal(err)
 	}
 	p.AwaitStartup()
+	p.PauseAll()
 	return p
 }
 

@@ -1,4 +1,4 @@
-<modal id="majorUpgrade" status="danger" icon="arrow-circle-up" heading="{{'Major Upgrade' | translate}}" large="no" closeable="yes">
+<modal id="majorUpgrade" status="danger" icon="fas fa-arrow-circle-up" heading="{{'Major Upgrade' | translate}}" large="no" closeable="yes">
   <div class="modal-body">
     <p>
       <span translate>This is a major version upgrade.</span>
@@ -6,15 +6,15 @@
       <span translate>Please consult the release notes before performing a major upgrade.</span>
     </p>
     <p>
-      <a href="https://github.com/syncthing/syncthing/releases/tag/{{upgradeInfo.latest}}" target="_blank" translate>Release Notes</a>
+      <a ng-href="https://github.com/syncthing/syncthing/releases/tag/{{upgradeInfo.latest}}" target="_blank" translate>Release Notes</a>
     </p>
   </div>
   <div class="modal-footer">
     <button type="button" class="btn btn-primary btn-sm" ng-click="upgrade()">
-      <span class="fa fa-check"></span>&nbsp;<span translate>Upgrade</span>
+      <span class="fas fa-check"></span>&nbsp;<span translate>Upgrade</span>
     </button>
     <button type="button" class="btn btn-default btn-sm" data-dismiss="modal">
-      <span class="fa fa-times"></span>&nbsp;<span translate>Close</span>
+      <span class="fas fa-times"></span>&nbsp;<span translate>Close</span>
     </button>
   </div>
 </modal>

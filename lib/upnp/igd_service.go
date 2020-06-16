@@ -33,6 +33,7 @@
 package upnp
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"net"
@@ -43,13 +44,16 @@ import (
 
 // An IGDService is a specific service provided by an IGD.
 type IGDService struct {
-	ID  string
-	URL string
-	URN string
+	UUID      string
+	Device    upnpDevice
+	ServiceID string
+	URL       string
+	URN       string
+	LocalIP   net.IP
 }
 
 // AddPortMapping adds a port mapping to the specified IGD service.
-func (s *IGDService) AddPortMapping(localIPAddress net.IP, protocol nat.Protocol, internalPort, externalPort int, description string, duration time.Duration) error {
+func (s *IGDService) AddPortMapping(ctx context.Context, protocol nat.Protocol, internalPort, externalPort int, description string, duration time.Duration) (int, error) {
 	tpl := `<u:AddPortMapping xmlns:u="%s">
 	<NewRemoteHost></NewRemoteHost>
 	<NewExternalPort>%d</NewExternalPort>
@@ -60,25 +64,25 @@ func (s *IGDService) AddPortMapping(localIPAddress net.IP, protocol nat.Protocol
 	<NewPortMappingDescription>%s</NewPortMappingDescription>
 	<NewLeaseDuration>%d</NewLeaseDuration>
 	</u:AddPortMapping>`
-	body := fmt.Sprintf(tpl, s.URN, externalPort, protocol, internalPort, localIPAddress, description, duration/time.Second)
+	body := fmt.Sprintf(tpl, s.URN, externalPort, protocol, internalPort, s.LocalIP, description, duration/time.Second)
 
-	response, err := soapRequest(s.URL, s.URN, "AddPortMapping", body)
+	response, err := soapRequest(ctx, s.URL, s.URN, "AddPortMapping", body)
 	if err != nil && duration > 0 {
 		// Try to repair error code 725 - OnlyPermanentLeasesSupported
 		envelope := &soapErrorResponse{}
 		if unmarshalErr := xml.Unmarshal(response, envelope); unmarshalErr != nil {
-			return unmarshalErr
+			return externalPort, unmarshalErr
 		}
 		if envelope.ErrorCode == 725 {
-			return s.AddPortMapping(localIPAddress, protocol, internalPort, externalPort, description, 0)
+			return s.AddPortMapping(ctx, protocol, internalPort, externalPort, description, 0)
 		}
 	}
 
-	return err
+	return externalPort, err
 }
 
 // DeletePortMapping deletes a port mapping from the specified IGD service.
-func (s *IGDService) DeletePortMapping(protocol nat.Protocol, externalPort int) error {
+func (s *IGDService) DeletePortMapping(ctx context.Context, protocol nat.Protocol, externalPort int) error {
 	tpl := `<u:DeletePortMapping xmlns:u="%s">
 	<NewRemoteHost></NewRemoteHost>
 	<NewExternalPort>%d</NewExternalPort>
@@ -86,19 +90,19 @@ func (s *IGDService) DeletePortMapping(protocol nat.Protocol, externalPort int) 
 	</u:DeletePortMapping>`
 	body := fmt.Sprintf(tpl, s.URN, externalPort, protocol)
 
-	_, err := soapRequest(s.URL, s.URN, "DeletePortMapping", body)
+	_, err := soapRequest(ctx, s.URL, s.URN, "DeletePortMapping", body)
 	return err
 }
 
 // GetExternalIPAddress queries the IGD service for its external IP address.
 // Returns nil if the external IP address is invalid or undefined, along with
 // any relevant errors
-func (s *IGDService) GetExternalIPAddress() (net.IP, error) {
+func (s *IGDService) GetExternalIPAddress(ctx context.Context) (net.IP, error) {
 	tpl := `<u:GetExternalIPAddress xmlns:u="%s" />`
 
 	body := fmt.Sprintf(tpl, s.URN)
 
-	response, err := soapRequest(s.URL, s.URN, "GetExternalIPAddress", body)
+	response, err := soapRequest(ctx, s.URL, s.URN, "GetExternalIPAddress", body)
 
 	if err != nil {
 		return nil, err
@@ -113,4 +117,14 @@ func (s *IGDService) GetExternalIPAddress() (net.IP, error) {
 	result := net.ParseIP(envelope.Body.GetExternalIPAddressResponse.NewExternalIPAddress)
 
 	return result, nil
+}
+
+// GetLocalIPAddress returns local IP address used to contact this service
+func (s *IGDService) GetLocalIPAddress() net.IP {
+	return s.LocalIP
+}
+
+// ID returns a unique ID for the servic
+func (s *IGDService) ID() string {
+	return s.UUID + "/" + s.Device.FriendlyName + "/" + s.ServiceID + "/" + s.URN + "/" + s.URL
 }

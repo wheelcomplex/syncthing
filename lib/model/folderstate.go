@@ -18,6 +18,9 @@ type folderState int
 const (
 	FolderIdle folderState = iota
 	FolderScanning
+	FolderScanWaiting
+	FolderSyncWaiting
+	FolderSyncPreparing
 	FolderSyncing
 	FolderError
 )
@@ -28,6 +31,12 @@ func (s folderState) String() string {
 		return "idle"
 	case FolderScanning:
 		return "scanning"
+	case FolderScanWaiting:
+		return "scan-waiting"
+	case FolderSyncWaiting:
+		return "sync-waiting"
+	case FolderSyncPreparing:
+		return "sync-preparing"
 	case FolderSyncing:
 		return "syncing"
 	case FolderError:
@@ -39,6 +48,7 @@ func (s folderState) String() string {
 
 type stateTracker struct {
 	folderID string
+	evLogger events.Logger
 
 	mut     sync.Mutex
 	current folderState
@@ -46,9 +56,10 @@ type stateTracker struct {
 	changed time.Time
 }
 
-func newStateTracker(id string) stateTracker {
+func newStateTracker(id string, evLogger events.Logger) stateTracker {
 	return stateTracker{
 		folderID: id,
+		evLogger: evLogger,
 		mut:      sync.NewMutex(),
 	}
 }
@@ -60,29 +71,32 @@ func (s *stateTracker) setState(newState folderState) {
 	}
 
 	s.mut.Lock()
-	if newState != s.current {
-		/* This should hold later...
-		if s.current != FolderIdle && (newState == FolderScanning || newState == FolderSyncing) {
-			panic("illegal state transition " + s.current.String() + " -> " + newState.String())
-		}
-		*/
+	defer s.mut.Unlock()
 
-		eventData := map[string]interface{}{
-			"folder": s.folderID,
-			"to":     newState.String(),
-			"from":   s.current.String(),
-		}
-
-		if !s.changed.IsZero() {
-			eventData["duration"] = time.Since(s.changed).Seconds()
-		}
-
-		s.current = newState
-		s.changed = time.Now()
-
-		events.Default.Log(events.StateChanged, eventData)
+	if newState == s.current {
+		return
 	}
-	s.mut.Unlock()
+
+	/* This should hold later...
+	if s.current != FolderIdle && (newState == FolderScanning || newState == FolderSyncing) {
+		panic("illegal state transition " + s.current.String() + " -> " + newState.String())
+	}
+	*/
+
+	eventData := map[string]interface{}{
+		"folder": s.folderID,
+		"to":     newState.String(),
+		"from":   s.current.String(),
+	}
+
+	if !s.changed.IsZero() {
+		eventData["duration"] = time.Since(s.changed).Seconds()
+	}
+
+	s.current = newState
+	s.changed = time.Now()
+
+	s.evLogger.Log(events.StateChanged, eventData)
 }
 
 // getState returns the current state, the time when it last changed, and the
@@ -94,49 +108,32 @@ func (s *stateTracker) getState() (current folderState, changed time.Time, err e
 	return
 }
 
-// setError sets the folder state to FolderError with the specified error.
+// setError sets the folder state to FolderError with the specified error or
+// to FolderIdle if the error is nil
 func (s *stateTracker) setError(err error) {
 	s.mut.Lock()
-	if s.current != FolderError || s.err.Error() != err.Error() {
-		eventData := map[string]interface{}{
-			"folder": s.folderID,
-			"to":     FolderError.String(),
-			"from":   s.current.String(),
-			"error":  err.Error(),
-		}
+	defer s.mut.Unlock()
 
-		if !s.changed.IsZero() {
-			eventData["duration"] = time.Since(s.changed).Seconds()
-		}
+	eventData := map[string]interface{}{
+		"folder": s.folderID,
+		"from":   s.current.String(),
+	}
 
+	if err != nil {
+		eventData["error"] = err.Error()
 		s.current = FolderError
-		s.err = err
-		s.changed = time.Now()
-
-		events.Default.Log(events.StateChanged, eventData)
-	}
-	s.mut.Unlock()
-}
-
-// clearError sets the folder state to FolderIdle and clears the error
-func (s *stateTracker) clearError() {
-	s.mut.Lock()
-	if s.current == FolderError {
-		eventData := map[string]interface{}{
-			"folder": s.folderID,
-			"to":     FolderIdle.String(),
-			"from":   s.current.String(),
-		}
-
-		if !s.changed.IsZero() {
-			eventData["duration"] = time.Since(s.changed).Seconds()
-		}
-
+	} else {
 		s.current = FolderIdle
-		s.err = nil
-		s.changed = time.Now()
-
-		events.Default.Log(events.StateChanged, eventData)
 	}
-	s.mut.Unlock()
+
+	eventData["to"] = s.current.String()
+
+	if !s.changed.IsZero() {
+		eventData["duration"] = time.Since(s.changed).Seconds()
+	}
+
+	s.err = err
+	s.changed = time.Now()
+
+	s.evLogger.Log(events.StateChanged, eventData)
 }

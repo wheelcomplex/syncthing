@@ -4,18 +4,21 @@ package protocol
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/ioutil"
-	"strings"
+	"runtime"
+	"sync"
 	"testing"
 	"testing/quick"
 	"time"
 
-	"encoding/hex"
-
 	"github.com/syncthing/syncthing/lib/rand"
+	"github.com/syncthing/syncthing/lib/testutils"
 )
 
 var (
@@ -43,6 +46,8 @@ func TestPing(t *testing.T) {
 	}
 }
 
+var errManual = errors.New("manual close")
+
 func TestClose(t *testing.T) {
 	m0 := newTestModel()
 	m1 := newTestModel()
@@ -57,10 +62,10 @@ func TestClose(t *testing.T) {
 	c0.ClusterConfig(ClusterConfig{})
 	c1.ClusterConfig(ClusterConfig{})
 
-	c0.close(errors.New("manual close"))
+	c0.internalClose(errManual)
 
 	<-c0.closed
-	if err := m0.closedError(); err == nil || !strings.Contains(err.Error(), "manual close") {
+	if err := m0.closedError(); err != errManual {
 		t.Fatal("Connection should be closed")
 	}
 
@@ -70,11 +75,178 @@ func TestClose(t *testing.T) {
 		t.Error("Ping should not return true")
 	}
 
-	c0.Index("default", nil)
-	c0.Index("default", nil)
+	ctx := context.Background()
 
-	if _, err := c0.Request("default", "foo", 0, 0, nil, false); err == nil {
+	c0.Index(ctx, "default", nil)
+	c0.Index(ctx, "default", nil)
+
+	if _, err := c0.Request(ctx, "default", "foo", 0, 0, nil, 0, false); err == nil {
 		t.Error("Request should return an error")
+	}
+}
+
+// TestCloseOnBlockingSend checks that the connection does not deadlock when
+// Close is called while the underlying connection is broken (send blocks).
+// https://github.com/syncthing/syncthing/pull/5442
+func TestCloseOnBlockingSend(t *testing.T) {
+	oldCloseTimeout := CloseTimeout
+	CloseTimeout = 100 * time.Millisecond
+	defer func() {
+		CloseTimeout = oldCloseTimeout
+	}()
+
+	m := newTestModel()
+
+	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.BlockingRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	c.Start()
+
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		c.ClusterConfig(ClusterConfig{})
+		wg.Done()
+	}()
+
+	wg.Add(1)
+	go func() {
+		c.Close(errManual)
+		wg.Done()
+	}()
+
+	// This simulates an error from ping timeout
+	wg.Add(1)
+	go func() {
+		c.internalClose(ErrTimeout)
+		wg.Done()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out before all functions returned")
+	}
+}
+
+func TestCloseRace(t *testing.T) {
+	indexReceived := make(chan struct{})
+	unblockIndex := make(chan struct{})
+	m0 := newTestModel()
+	m0.indexFn = func(_ DeviceID, _ string, _ []FileInfo) {
+		close(indexReceived)
+		<-unblockIndex
+	}
+	m1 := newTestModel()
+
+	ar, aw := io.Pipe()
+	br, bw := io.Pipe()
+
+	c0 := NewConnection(c0ID, ar, bw, m0, "c0", CompressNever).(wireFormatConnection).Connection.(*rawConnection)
+	c0.Start()
+	c1 := NewConnection(c1ID, br, aw, m1, "c1", CompressNever)
+	c1.Start()
+	c0.ClusterConfig(ClusterConfig{})
+	c1.ClusterConfig(ClusterConfig{})
+
+	c1.Index(context.Background(), "default", nil)
+	select {
+	case <-indexReceived:
+	case <-time.After(time.Second):
+		t.Fatal("timed out before receiving index")
+	}
+
+	go c0.internalClose(errManual)
+	select {
+	case <-c0.closed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out before c0.closed was closed")
+	}
+
+	select {
+	case <-m0.closedCh:
+		t.Errorf("receiver.Closed called before receiver.Index")
+	default:
+	}
+
+	close(unblockIndex)
+
+	if err := m0.closedError(); err != errManual {
+		t.Fatal("Connection should be closed")
+	}
+}
+
+func TestClusterConfigFirst(t *testing.T) {
+	m := newTestModel()
+
+	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.NoopRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	c.Start()
+
+	select {
+	case c.outbox <- asyncMessage{&Ping{}, nil}:
+		t.Fatal("able to send ping before cluster config")
+	case <-time.After(100 * time.Millisecond):
+		// Allow some time for c.writerLoop to setup after c.Start
+	}
+
+	c.ClusterConfig(ClusterConfig{})
+
+	done := make(chan struct{})
+	if ok := c.send(context.Background(), &Ping{}, done); !ok {
+		t.Fatal("send ping after cluster config returned false")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out before ping was sent")
+	}
+
+	done = make(chan struct{})
+	go func() {
+		c.internalClose(errManual)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close didn't return before timeout")
+	}
+
+	if err := m.closedError(); err != errManual {
+		t.Fatal("Connection should be closed")
+	}
+}
+
+// TestCloseTimeout checks that calling Close times out and proceeds, if sending
+// the close message does not succeed.
+func TestCloseTimeout(t *testing.T) {
+	oldCloseTimeout := CloseTimeout
+	CloseTimeout = 100 * time.Millisecond
+	defer func() {
+		CloseTimeout = oldCloseTimeout
+	}()
+
+	m := newTestModel()
+
+	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.BlockingRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	c.Start()
+
+	done := make(chan struct{})
+	go func() {
+		c.Close(errManual)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * CloseTimeout):
+		t.Fatal("timed out before Close returned")
 	}
 }
 
@@ -234,48 +406,6 @@ func testMarshal(t *testing.T, prefix string, m1, m2 message) bool {
 	return true
 }
 
-func TestMarshalledIndexMessageSize(t *testing.T) {
-	// We should be able to handle a 1 TiB file without
-	// blowing the default max message size.
-
-	if testing.Short() {
-		t.Skip("this test requires a lot of memory")
-		return
-	}
-
-	const (
-		maxMessageSize = MaxMessageLen
-		fileSize       = 1 << 40
-		blockSize      = BlockSize
-	)
-
-	f := FileInfo{
-		Name:        "a normal length file name withoout any weird stuff.txt",
-		Type:        FileInfoTypeFile,
-		Size:        fileSize,
-		Permissions: 0666,
-		ModifiedS:   time.Now().Unix(),
-		Version:     Vector{Counters: []Counter{{ID: 1 << 60, Value: 1}, {ID: 2 << 60, Value: 1}}},
-		Blocks:      make([]BlockInfo, fileSize/blockSize),
-	}
-
-	for i := 0; i < fileSize/blockSize; i++ {
-		f.Blocks[i].Offset = int64(i) * blockSize
-		f.Blocks[i].Size = blockSize
-		f.Blocks[i].Hash = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 30, 1, 2}
-	}
-
-	idx := Index{
-		Folder: "some folder ID",
-		Files:  []FileInfo{f},
-	}
-
-	msgSize := idx.ProtoSize()
-	if msgSize > maxMessageSize {
-		t.Errorf("Message size %d bytes is larger than max %d", msgSize, maxMessageSize)
-	}
-}
-
 func TestLZ4Compression(t *testing.T) {
 	c := new(rawConnection)
 
@@ -304,6 +434,38 @@ func TestLZ4Compression(t *testing.T) {
 			t.Error("Incorrect decompressed data")
 		}
 		t.Logf("OK #%d, %d -> %d -> %d", i, dataLen, len(comp), dataLen)
+	}
+}
+
+func TestStressLZ4CompressGrows(t *testing.T) {
+	c := new(rawConnection)
+	success := 0
+	for i := 0; i < 100; i++ {
+		// Create a slize that is precisely one min block size, fill it with
+		// random data. This shouldn't compress at all, so will in fact
+		// become larger when LZ4 does its thing.
+		data := make([]byte, MinBlockSize)
+		if _, err := rand.Reader.Read(data); err != nil {
+			t.Fatal("randomness failure")
+		}
+
+		comp, err := c.lz4Compress(data)
+		if err != nil {
+			t.Fatal("unexpected compression error: ", err)
+		}
+		if len(comp) < len(data) {
+			// data size should grow. We must have been really unlucky in
+			// the random generation, try again.
+			continue
+		}
+
+		// Putting it into the buffer pool shouldn't panic because the block
+		// should come from there to begin with.
+		BufferPool.Put(comp)
+		success++
+	}
+	if success == 0 {
+		t.Fatal("unable to find data that grows when compressed")
 	}
 }
 
@@ -398,5 +560,366 @@ func TestCheckConsistency(t *testing.T) {
 		if !tc.ok && err == nil {
 			t.Errorf("Unexpected nil error for %v", tc.fi)
 		}
+	}
+}
+
+func TestBlockSize(t *testing.T) {
+	cases := []struct {
+		fileSize  int64
+		blockSize int
+	}{
+		{1 << KiB, 128 << KiB},
+		{1 << MiB, 128 << KiB},
+		{499 << MiB, 256 << KiB},
+		{500 << MiB, 512 << KiB},
+		{501 << MiB, 512 << KiB},
+		{1 << GiB, 1 << MiB},
+		{2 << GiB, 2 << MiB},
+		{3 << GiB, 2 << MiB},
+		{500 << GiB, 16 << MiB},
+		{50000 << GiB, 16 << MiB},
+	}
+
+	for _, tc := range cases {
+		size := BlockSize(tc.fileSize)
+		if size != tc.blockSize {
+			t.Errorf("BlockSize(%d), size=%d, expected %d", tc.fileSize, size, tc.blockSize)
+		}
+	}
+}
+
+var blockSize int
+
+func BenchmarkBlockSize(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		blockSize = BlockSize(16 << 30)
+	}
+}
+
+func TestLocalFlagBits(t *testing.T) {
+	var f FileInfo
+	if f.IsIgnored() || f.MustRescan() || f.IsInvalid() {
+		t.Error("file should have no weird bits set by default")
+	}
+
+	f.SetIgnored(42)
+	if !f.IsIgnored() || f.MustRescan() || !f.IsInvalid() {
+		t.Error("file should be ignored and invalid")
+	}
+
+	f.SetMustRescan(42)
+	if f.IsIgnored() || !f.MustRescan() || !f.IsInvalid() {
+		t.Error("file should be must-rescan and invalid")
+	}
+
+	f.SetUnsupported(42)
+	if f.IsIgnored() || f.MustRescan() || !f.IsInvalid() {
+		t.Error("file should be invalid")
+	}
+}
+
+func TestIsEquivalent(t *testing.T) {
+	b := func(v bool) *bool {
+		return &v
+	}
+
+	type testCase struct {
+		a         FileInfo
+		b         FileInfo
+		ignPerms  *bool // nil means should not matter, we'll test both variants
+		ignBlocks *bool
+		ignFlags  uint32
+		eq        bool
+	}
+	cases := []testCase{
+		// Empty FileInfos are equivalent
+		{eq: true},
+
+		// Various basic attributes, all of which cause ineqality when
+		// they differ
+		{
+			a:  FileInfo{Name: "foo"},
+			b:  FileInfo{Name: "bar"},
+			eq: false,
+		},
+		{
+			a:  FileInfo{Type: FileInfoTypeFile},
+			b:  FileInfo{Type: FileInfoTypeDirectory},
+			eq: false,
+		},
+		{
+			a:  FileInfo{Size: 1234},
+			b:  FileInfo{Size: 2345},
+			eq: false,
+		},
+		{
+			a:  FileInfo{Deleted: false},
+			b:  FileInfo{Deleted: true},
+			eq: false,
+		},
+		{
+			a:  FileInfo{RawInvalid: false},
+			b:  FileInfo{RawInvalid: true},
+			eq: false,
+		},
+		{
+			a:  FileInfo{ModifiedS: 1234},
+			b:  FileInfo{ModifiedS: 2345},
+			eq: false,
+		},
+		{
+			a:  FileInfo{ModifiedNs: 1234},
+			b:  FileInfo{ModifiedNs: 2345},
+			eq: false,
+		},
+
+		// Special handling of local flags and invalidity. "MustRescan"
+		// files are never equivalent to each other. Otherwise, equivalence
+		// is based just on whether the file becomes IsInvalid() or not, not
+		// the specific reason or flag bits.
+		{
+			a:  FileInfo{LocalFlags: FlagLocalMustRescan},
+			b:  FileInfo{LocalFlags: FlagLocalMustRescan},
+			eq: false,
+		},
+		{
+			a:  FileInfo{RawInvalid: true},
+			b:  FileInfo{RawInvalid: true},
+			eq: true,
+		},
+		{
+			a:  FileInfo{LocalFlags: FlagLocalUnsupported},
+			b:  FileInfo{LocalFlags: FlagLocalUnsupported},
+			eq: true,
+		},
+		{
+			a:  FileInfo{RawInvalid: true},
+			b:  FileInfo{LocalFlags: FlagLocalUnsupported},
+			eq: true,
+		},
+		{
+			a:  FileInfo{LocalFlags: 0},
+			b:  FileInfo{LocalFlags: FlagLocalReceiveOnly},
+			eq: false,
+		},
+		{
+			a:        FileInfo{LocalFlags: 0},
+			b:        FileInfo{LocalFlags: FlagLocalReceiveOnly},
+			ignFlags: FlagLocalReceiveOnly,
+			eq:       true,
+		},
+
+		// Difference in blocks is not OK
+		{
+			a:         FileInfo{Blocks: []BlockInfo{{Hash: []byte{1, 2, 3, 4}}}},
+			b:         FileInfo{Blocks: []BlockInfo{{Hash: []byte{2, 3, 4, 5}}}},
+			ignBlocks: b(false),
+			eq:        false,
+		},
+
+		// ... unless we say it is
+		{
+			a:         FileInfo{Blocks: []BlockInfo{{Hash: []byte{1, 2, 3, 4}}}},
+			b:         FileInfo{Blocks: []BlockInfo{{Hash: []byte{2, 3, 4, 5}}}},
+			ignBlocks: b(true),
+			eq:        true,
+		},
+
+		// Difference in permissions is not OK.
+		{
+			a:        FileInfo{Permissions: 0444},
+			b:        FileInfo{Permissions: 0666},
+			ignPerms: b(false),
+			eq:       false,
+		},
+
+		// ... unless we say it is
+		{
+			a:        FileInfo{Permissions: 0666},
+			b:        FileInfo{Permissions: 0444},
+			ignPerms: b(true),
+			eq:       true,
+		},
+
+		// These attributes are not checked at all
+		{
+			a:  FileInfo{NoPermissions: false},
+			b:  FileInfo{NoPermissions: true},
+			eq: true,
+		},
+		{
+			a:  FileInfo{Version: Vector{Counters: []Counter{{ID: 1, Value: 42}}}},
+			b:  FileInfo{Version: Vector{Counters: []Counter{{ID: 42, Value: 1}}}},
+			eq: true,
+		},
+		{
+			a:  FileInfo{Sequence: 1},
+			b:  FileInfo{Sequence: 2},
+			eq: true,
+		},
+
+		// The block size is not checked (but this would fail the blocks
+		// check in real world)
+		{
+			a:  FileInfo{RawBlockSize: 1},
+			b:  FileInfo{RawBlockSize: 2},
+			eq: true,
+		},
+
+		// The symlink target is checked for symlinks
+		{
+			a:  FileInfo{Type: FileInfoTypeSymlink, SymlinkTarget: "a"},
+			b:  FileInfo{Type: FileInfoTypeSymlink, SymlinkTarget: "b"},
+			eq: false,
+		},
+
+		// ... but not for non-symlinks
+		{
+			a:  FileInfo{Type: FileInfoTypeFile, SymlinkTarget: "a"},
+			b:  FileInfo{Type: FileInfoTypeFile, SymlinkTarget: "b"},
+			eq: true,
+		},
+	}
+
+	if runtime.GOOS == "windows" {
+		// On windows we only check the user writable bit of the permission
+		// set, so these are equivalent.
+		cases = append(cases, testCase{
+			a:        FileInfo{Permissions: 0777},
+			b:        FileInfo{Permissions: 0600},
+			ignPerms: b(false),
+			eq:       true,
+		})
+	}
+
+	for i, tc := range cases {
+		// Check the standard attributes with all permutations of the
+		// special ignore flags, unless the value of those flags are given
+		// in the tests.
+		for _, ignPerms := range []bool{true, false} {
+			for _, ignBlocks := range []bool{true, false} {
+				if tc.ignPerms != nil && *tc.ignPerms != ignPerms {
+					continue
+				}
+				if tc.ignBlocks != nil && *tc.ignBlocks != ignBlocks {
+					continue
+				}
+
+				if res := tc.a.isEquivalent(tc.b, 0, ignPerms, ignBlocks, tc.ignFlags); res != tc.eq {
+					t.Errorf("Case %d:\na: %v\nb: %v\na.IsEquivalent(b, %v, %v) => %v, expected %v", i, tc.a, tc.b, ignPerms, ignBlocks, res, tc.eq)
+				}
+				if res := tc.b.isEquivalent(tc.a, 0, ignPerms, ignBlocks, tc.ignFlags); res != tc.eq {
+					t.Errorf("Case %d:\na: %v\nb: %v\nb.IsEquivalent(a, %v, %v) => %v, expected %v", i, tc.a, tc.b, ignPerms, ignBlocks, res, tc.eq)
+				}
+			}
+		}
+	}
+}
+
+func TestSha256OfEmptyBlock(t *testing.T) {
+	// every block size should have a correct entry in sha256OfEmptyBlock
+	for blockSize := MinBlockSize; blockSize <= MaxBlockSize; blockSize *= 2 {
+		expected := sha256.Sum256(make([]byte, blockSize))
+		if sha256OfEmptyBlock[blockSize] != expected {
+			t.Error("missing or wrong hash for block of size", blockSize)
+		}
+	}
+}
+
+// TestClusterConfigAfterClose checks that ClusterConfig does not deadlock when
+// ClusterConfig is called on a closed connection.
+func TestClusterConfigAfterClose(t *testing.T) {
+	m := newTestModel()
+
+	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.BlockingRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	c.Start()
+
+	c.internalClose(errManual)
+
+	done := make(chan struct{})
+	go func() {
+		c.ClusterConfig(ClusterConfig{})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out before Cluster Config returned")
+	}
+}
+
+func TestDispatcherToCloseDeadlock(t *testing.T) {
+	// Verify that we don't deadlock when calling Close() from within one of
+	// the model callbacks (ClusterConfig).
+	m := newTestModel()
+	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.NoopRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	m.ccFn = func(devID DeviceID, cc ClusterConfig) {
+		c.Close(errManual)
+	}
+	c.Start()
+
+	c.inbox <- &ClusterConfig{}
+
+	select {
+	case <-c.dispatcherLoopStopped:
+	case <-time.After(time.Second):
+		t.Fatal("timed out before dispatcher loop terminated")
+	}
+}
+
+func TestBlocksEqual(t *testing.T) {
+	blocksOne := []BlockInfo{{Hash: []byte{1, 2, 3, 4}}}
+	blocksTwo := []BlockInfo{{Hash: []byte{5, 6, 7, 8}}}
+	hashOne := []byte{42, 42, 42, 42}
+	hashTwo := []byte{29, 29, 29, 29}
+
+	cases := []struct {
+		b1 []BlockInfo
+		h1 []byte
+		b2 []BlockInfo
+		h2 []byte
+		eq bool
+	}{
+		{blocksOne, hashOne, blocksOne, hashOne, true},  // everything equal
+		{blocksOne, hashOne, blocksTwo, hashTwo, false}, // nothing equal
+		{blocksOne, hashOne, blocksOne, nil, true},      // blocks compared
+		{blocksOne, nil, blocksOne, nil, true},          // blocks compared
+		{blocksOne, nil, blocksTwo, nil, false},         // blocks compared
+		{blocksOne, hashOne, blocksTwo, hashOne, true},  // hashes equal, blocks not looked at
+		{blocksOne, hashOne, blocksOne, hashTwo, false}, // hashes different, blocks not looked at
+		{blocksOne, hashOne, nil, nil, false},           // blocks is different from no blocks
+		{blocksOne, nil, nil, nil, false},               // blocks is different from no blocks
+		{nil, hashOne, nil, nil, true},                  // nil blocks are equal, even of one side has a hash
+	}
+
+	for _, tc := range cases {
+		f1 := FileInfo{Blocks: tc.b1, BlocksHash: tc.h1}
+		f2 := FileInfo{Blocks: tc.b2, BlocksHash: tc.h2}
+
+		if !f1.BlocksEqual(f1) {
+			t.Error("f1 is always equal to itself", f1)
+		}
+		if !f2.BlocksEqual(f2) {
+			t.Error("f2 is always equal to itself", f2)
+		}
+		if res := f1.BlocksEqual(f2); res != tc.eq {
+			t.Log("f1", f1.BlocksHash, f1.Blocks)
+			t.Log("f2", f2.BlocksHash, f2.Blocks)
+			t.Errorf("f1.BlocksEqual(f2) == %v but should be %v", res, tc.eq)
+		}
+		if res := f2.BlocksEqual(f1); res != tc.eq {
+			t.Log("f1", f1.BlocksHash, f1.Blocks)
+			t.Log("f2", f2.BlocksHash, f2.Blocks)
+			t.Errorf("f2.BlocksEqual(f1) == %v but should be %v", res, tc.eq)
+		}
+	}
+}
+
+func TestIndexIDString(t *testing.T) {
+	// Index ID is a 64 bit, zero padded hex integer.
+	var i IndexID = 42
+	if i.String() != "0x000000000000002A" {
+		t.Error(i.String())
 	}
 }

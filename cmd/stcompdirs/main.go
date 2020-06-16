@@ -60,7 +60,7 @@ func compareDirectories(dirs ...string) error {
 				} else if res[i].name > res[0].name {
 					return fmt.Errorf("%s missing %v (present in %s)", dirs[i], res[0], dirs[0])
 				}
-				return fmt.Errorf("Mismatch; %v (%s) != %v (%s)", res[i], dirs[i], res[0], dirs[0])
+				return fmt.Errorf("mismatch; %v (%s) != %v (%s)", res[i], dirs[i], res[0], dirs[0])
 			}
 		}
 
@@ -88,10 +88,10 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 		}
 
 		rn, _ := filepath.Rel(dir, path)
-		if rn == "." || rn == ".stfolder" {
+		if rn == "." {
 			return nil
 		}
-		if rn == ".stversions" {
+		if rn == ".stversions" || rn == ".stfolder" {
 			return filepath.SkipDir
 		}
 

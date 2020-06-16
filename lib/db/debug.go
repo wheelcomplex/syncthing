@@ -7,9 +7,6 @@
 package db
 
 import (
-	"os"
-	"strings"
-
 	"github.com/syncthing/syncthing/lib/logger"
 )
 
@@ -17,6 +14,6 @@ var (
 	l = logger.DefaultLogger.NewFacility("db", "The database layer")
 )
 
-func init() {
-	l.SetDebug("db", strings.Contains(os.Getenv("STTRACE"), "db") || os.Getenv("STTRACE") == "all")
+func shouldDebug() bool {
+	return l.ShouldDebug("db")
 }

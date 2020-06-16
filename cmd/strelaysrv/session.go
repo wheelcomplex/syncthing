@@ -22,7 +22,7 @@ import (
 var (
 	sessionMut      = sync.RWMutex{}
 	activeSessions  = make([]*session, 0)
-	pendingSessions = make(map[string]*session, 0)
+	pendingSessions = make(map[string]*session)
 	numProxies      int64
 	bytesProxied    int64
 )
@@ -189,7 +189,7 @@ done:
 	// We can end up here in 3 cases:
 	// 1. Timeout joining, in which case there are potentially entries in pendingSessions
 	// 2. General session end/timeout, in which case there are entries in activeSessions
-	// 3. Protocol handler calls dropSession as one of it's clients disconnects.
+	// 3. Protocol handler calls dropSession as one of its clients disconnects.
 
 	sessionMut.Lock()
 	delete(pendingSessions, string(s.serverkey))
@@ -254,7 +254,7 @@ func (s *session) proxy(c1, c2 net.Conn) error {
 	atomic.AddInt64(&numProxies, 1)
 	defer atomic.AddInt64(&numProxies, -1)
 
-	buf := make([]byte, 65536)
+	buf := make([]byte, networkBufferSize)
 	for {
 		c1.SetReadDeadline(time.Now().Add(networkTimeout))
 		n, err := c1.Read(buf)

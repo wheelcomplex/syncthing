@@ -7,6 +7,7 @@
 package discover
 
 import (
+	"context"
 	"crypto/tls"
 	"io/ioutil"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 )
@@ -54,15 +56,15 @@ func TestGlobalOverHTTP(t *testing.T) {
 	// is only allowed in combination with the "insecure" and "noannounce"
 	// parameters.
 
-	if _, err := NewGlobal("http://192.0.2.42/", tls.Certificate{}, nil); err == nil {
+	if _, err := NewGlobal("http://192.0.2.42/", tls.Certificate{}, nil, events.NoopLogger); err == nil {
 		t.Fatal("http is not allowed without insecure and noannounce")
 	}
 
-	if _, err := NewGlobal("http://192.0.2.42/?insecure", tls.Certificate{}, nil); err == nil {
+	if _, err := NewGlobal("http://192.0.2.42/?insecure", tls.Certificate{}, nil, events.NoopLogger); err == nil {
 		t.Fatal("http is not allowed without noannounce")
 	}
 
-	if _, err := NewGlobal("http://192.0.2.42/?noannounce", tls.Certificate{}, nil); err == nil {
+	if _, err := NewGlobal("http://192.0.2.42/?noannounce", tls.Certificate{}, nil, events.NoopLogger); err == nil {
 		t.Fatal("http is not allowed without insecure")
 	}
 
@@ -77,7 +79,7 @@ func TestGlobalOverHTTP(t *testing.T) {
 	s := new(fakeDiscoveryServer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handler)
-	go http.Serve(list, mux)
+	go func() { _ = http.Serve(list, mux) }()
 
 	// This should succeed
 	addresses, err := testLookup("http://" + list.Addr().String() + "?insecure&noannounce")
@@ -110,9 +112,8 @@ func TestGlobalOverHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Generate a server certificate, using fewer bits than usual to hurry the
-	// process along a bit.
-	cert, err := tlsutil.NewCertificate(dir+"/cert.pem", dir+"/key.pem", "syncthing", 1024)
+	// Generate a server certificate.
+	cert, err := tlsutil.NewCertificate(dir+"/cert.pem", dir+"/key.pem", "syncthing", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestGlobalOverHTTPS(t *testing.T) {
 	s := new(fakeDiscoveryServer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handler)
-	go http.Serve(list, mux)
+	go func() { _ = http.Serve(list, mux) }()
 
 	// With default options the lookup code expects the server certificate to
 	// check out according to the usual CA chains etc. That won't be the case
@@ -176,9 +177,8 @@ func TestGlobalAnnounce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Generate a server certificate, using fewer bits than usual to hurry the
-	// process along a bit.
-	cert, err := tlsutil.NewCertificate(dir+"/cert.pem", dir+"/key.pem", "syncthing", 1024)
+	// Generate a server certificate.
+	cert, err := tlsutil.NewCertificate(dir+"/cert.pem", dir+"/key.pem", "syncthing", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,10 +192,10 @@ func TestGlobalAnnounce(t *testing.T) {
 	s := new(fakeDiscoveryServer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handler)
-	go http.Serve(list, mux)
+	go func() { _ = http.Serve(list, mux) }()
 
 	url := "https://" + list.Addr().String() + "?insecure"
-	disco, err := NewGlobal(url, cert, new(fakeAddressLister))
+	disco, err := NewGlobal(url, cert, new(fakeAddressLister), events.NoopLogger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,19 +214,19 @@ func TestGlobalAnnounce(t *testing.T) {
 	}
 
 	if !strings.Contains(string(s.announce), "tcp://0.0.0.0:22000") {
-		t.Errorf("announce missing addresses address: %s", s.announce)
+		t.Errorf("announce missing address: %q", s.announce)
 	}
 }
 
 func testLookup(url string) ([]string, error) {
-	disco, err := NewGlobal(url, tls.Certificate{}, nil)
+	disco, err := NewGlobal(url, tls.Certificate{}, nil, events.NoopLogger)
 	if err != nil {
 		return nil, err
 	}
 	go disco.Serve()
 	defer disco.Stop()
 
-	return disco.Lookup(protocol.LocalDeviceID)
+	return disco.Lookup(context.Background(), protocol.LocalDeviceID)
 }
 
 type fakeDiscoveryServer struct {

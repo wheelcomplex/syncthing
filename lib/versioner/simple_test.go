@@ -9,10 +9,11 @@ package versioner
 import (
 	"io/ioutil"
 	"math"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/syncthing/syncthing/lib/fs"
 )
 
 func TestTaggedFilename(t *testing.T) {
@@ -33,14 +34,14 @@ func TestTaggedFilename(t *testing.T) {
 	for _, tc := range cases {
 		if tc[0] != "" {
 			// Test tagger
-			tf := taggedFilename(tc[0], tc[1])
+			tf := TagFilename(tc[0], tc[1])
 			if tf != tc[2] {
 				t.Errorf("%s != %s", tf, tc[2])
 			}
 		}
 
 		// Test parser
-		tag := filenameTag(tc[2])
+		tag := extractTag(tc[2])
 		if tag != tc[1] {
 			t.Errorf("%s != %s", tag, tc[1])
 		}
@@ -53,29 +54,28 @@ func TestSimpleVersioningVersionCount(t *testing.T) {
 	}
 
 	dir, err := ioutil.TempDir("", "")
-	defer os.RemoveAll(dir)
+	//defer os.RemoveAll(dir)
 	if err != nil {
 		t.Error(err)
 	}
 
-	v := NewSimple("", dir, map[string]string{"keep": "2"})
-	versionDir := filepath.Join(dir, ".stversions")
+	fs := fs.NewFilesystem(fs.FilesystemTypeBasic, dir)
 
-	path := filepath.Join(dir, "test")
+	v := newSimple(fs, map[string]string{"keep": "2"})
+
+	path := "test"
 
 	for i := 1; i <= 3; i++ {
-		f, err := os.Create(path)
+		f, err := fs.Create(path)
 		if err != nil {
 			t.Error(err)
 		}
 		f.Close()
-		v.Archive(path)
-
-		d, err := os.Open(versionDir)
-		if err != nil {
+		if err := v.Archive(path); err != nil {
 			t.Error(err)
 		}
-		n, err := d.Readdirnames(-1)
+
+		n, err := fs.DirNames(".stversions")
 		if err != nil {
 			t.Error(err)
 		}
@@ -83,7 +83,6 @@ func TestSimpleVersioningVersionCount(t *testing.T) {
 		if float64(len(n)) != math.Min(float64(i), 2) {
 			t.Error("Wrong count")
 		}
-		d.Close()
 
 		time.Sleep(time.Second)
 	}

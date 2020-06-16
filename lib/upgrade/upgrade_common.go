@@ -10,27 +10,33 @@ package upgrade
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"runtime"
 	"strconv"
 	"strings"
-
-	"github.com/kardianos/osext"
 )
 
 type Release struct {
 	Tag        string  `json:"tag_name"`
 	Prerelease bool    `json:"prerelease"`
 	Assets     []Asset `json:"assets"`
+
+	// The HTML URL is needed for human readable links in the output created
+	// by cmd/stupgrades.
+	HTMLURL string `json:"html_url"`
 }
 
 type Asset struct {
 	URL  string `json:"url"`
 	Name string `json:"name"`
+
+	// The browser URL is needed for human readable links in the output created
+	// by cmd/stupgrades.
+	BrowserURL string `json:"browser_download_url"`
 }
 
 var (
-	ErrVersionUpToDate    = errors.New("current version is up to date")
 	ErrNoReleaseDownload  = errors.New("couldn't find a release to download")
 	ErrNoVersionToSelect  = errors.New("no version to select")
 	ErrUpgradeUnsupported = errors.New("upgrade unsupported")
@@ -45,7 +51,7 @@ func init() {
 func To(rel Release) error {
 	select {
 	case <-upgradeUnlocked:
-		path, err := osext.Executable()
+		path, err := os.Executable()
 		if err != nil {
 			upgradeUnlocked <- true
 			return err
@@ -64,7 +70,7 @@ func To(rel Release) error {
 func ToURL(url string) error {
 	select {
 	case <-upgradeUnlocked:
-		binary, err := osext.Executable()
+		binary, err := os.Executable()
 		if err != nil {
 			upgradeUnlocked <- true
 			return err
@@ -84,10 +90,10 @@ type Relation int
 
 const (
 	MajorOlder Relation = -2 // Older by a major version (x in x.y.z or 0.x.y).
-	Older               = -1 // Older by a minor version (y or z in x.y.z, or y in 0.x.y)
-	Equal               = 0  // Versions are semantically equal
-	Newer               = 1  // Newer by a minor version (y or z in x.y.z, or y in 0.x.y)
-	MajorNewer          = 2  // Newer by a major version (x in x.y.z or 0.x.y).
+	Older      Relation = -1 // Older by a minor version (y or z in x.y.z, or y in 0.x.y)
+	Equal      Relation = 0  // Versions are semantically equal
+	Newer      Relation = 1  // Newer by a minor version (y or z in x.y.z, or y in 0.x.y)
+	MajorNewer Relation = 2  // Newer by a major version (x in x.y.z or 0.x.y).
 )
 
 // CompareVersions returns a relation describing how a compares to b.
@@ -225,15 +231,20 @@ func versionParts(v string) ([]int, []interface{}) {
 	return release, prerelease
 }
 
-func releaseName(tag string) string {
+func releaseNames(tag string) []string {
 	// We must ensure that the release asset matches the expected naming
 	// standard, containing both the architecture/OS and the tag name we
 	// expect. This protects against malformed release data potentially
 	// tricking us into doing a downgrade.
 	switch runtime.GOOS {
 	case "darwin":
-		return fmt.Sprintf("syncthing-macosx-%s-%s.", runtime.GOARCH, tag)
+		return []string{
+			fmt.Sprintf("syncthing-macos-%s-%s.", runtime.GOARCH, tag),
+			fmt.Sprintf("syncthing-macosx-%s-%s.", runtime.GOARCH, tag),
+		}
 	default:
-		return fmt.Sprintf("syncthing-%s-%s-%s.", runtime.GOOS, runtime.GOARCH, tag)
+		return []string{
+			fmt.Sprintf("syncthing-%s-%s-%s.", runtime.GOOS, runtime.GOARCH, tag),
+		}
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/syncthing/syncthing/lib/fs"
 )
 
 type Size struct {
@@ -70,6 +72,41 @@ func (s Size) String() string {
 	return fmt.Sprintf("%v %s", s.Value, s.Unit)
 }
 
-func (Size) ParseDefault(s string) (interface{}, error) {
-	return ParseSize(s)
+func (s *Size) ParseDefault(str string) error {
+	sz, err := ParseSize(str)
+	*s = sz
+	return err
+}
+
+func CheckFreeSpace(req Size, usage fs.Usage) error {
+	val := req.BaseValue()
+	if val <= 0 {
+		return nil
+	}
+
+	if req.Percentage() {
+		freePct := (float64(usage.Free) / float64(usage.Total)) * 100
+		if freePct < val {
+			return fmt.Errorf("%.1f %% < %v", freePct, req)
+		}
+	} else if float64(usage.Free) < val {
+		return fmt.Errorf("%sB < %v", formatSI(usage.Free), req)
+	}
+
+	return nil
+}
+
+func formatSI(b int64) string {
+	switch {
+	case b < 1000:
+		return fmt.Sprintf("%d ", b)
+	case b < 1000*1000:
+		return fmt.Sprintf("%.1f K", float64(b)/1000)
+	case b < 1000*1000*1000:
+		return fmt.Sprintf("%.1f M", float64(b)/(1000*1000))
+	case b < 1000*1000*1000*1000:
+		return fmt.Sprintf("%.1f G", float64(b)/(1000*1000*1000))
+	default:
+		return fmt.Sprintf("%.1f T", float64(b)/(1000*1000*1000*1000))
+	}
 }

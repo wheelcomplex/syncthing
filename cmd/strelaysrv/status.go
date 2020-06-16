@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"runtime"
 	"sync/atomic"
 	"time"
+
+	"github.com/syncthing/syncthing/lib/build"
 )
 
 var rc *rateCalculator
@@ -18,6 +21,9 @@ func statusService(addr string) {
 
 	handler := http.NewServeMux()
 	handler.HandleFunc("/status", getStatus)
+	if pprofEnabled {
+		handler.HandleFunc("/debug/pprof/", pprof.Index)
+	}
 
 	srv := http.Server{
 		Addr:        addr,
@@ -36,6 +42,10 @@ func getStatus(w http.ResponseWriter, r *http.Request) {
 
 	sessionMut.Lock()
 	// This can potentially be double the number of pending sessions, as each session has two keys, one for each side.
+	status["version"] = build.Version
+	status["buildHost"] = build.Host
+	status["buildUser"] = build.User
+	status["buildDate"] = build.Date
 	status["startTime"] = rc.startTime
 	status["uptimeSeconds"] = time.Since(rc.startTime) / time.Second
 	status["numPendingSessionKeys"] = len(pendingSessions)
@@ -78,9 +88,9 @@ func getStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type rateCalculator struct {
+	counter   *int64 // atomic, must remain 64-bit aligned
 	rates     []int64
 	prev      int64
-	counter   *int64
 	startTime time.Time
 }
 

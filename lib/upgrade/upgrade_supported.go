@@ -15,6 +15,7 @@ import (
 	"compress/gzip"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -66,8 +67,8 @@ const (
 var insecureHTTP = &http.Client{
 	Timeout: readTimeout,
 	Transport: &http.Transport{
-		Dial:  dialer.Dial,
-		Proxy: http.ProxyFromEnvironment,
+		DialContext: dialer.DialContext,
+		Proxy:       http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
@@ -134,35 +135,31 @@ func SelectLatestRelease(rels []Release, current string, upgradeToPreReleases bo
 
 	var selected Release
 	for _, rel := range rels {
-		switch CompareVersions(rel.Tag, current) {
-		case Older, MajorOlder:
-			// This is older than what we're already running
-			continue
-
-		case MajorNewer:
+		if CompareVersions(rel.Tag, current) == MajorNewer {
 			// We've found a new major version. That's fine, but if we've
 			// already found a minor upgrade that is acceptable we should go
 			// with that one first and then revisit in the future.
 			if selected.Tag != "" && CompareVersions(selected.Tag, current) == Newer {
 				return selected, nil
 			}
-			// else it may be viable, do the needful below
-
-		default:
-			// New minor release, do the usual processing
 		}
 
 		if rel.Prerelease && !upgradeToPreReleases {
+			l.Debugln("skipping pre-release", rel.Tag)
 			continue
 		}
+
+		expectedReleases := releaseNames(rel.Tag)
+	nextAsset:
 		for _, asset := range rel.Assets {
 			assetName := path.Base(asset.Name)
 			// Check for the architecture
-			expectedRelease := releaseName(rel.Tag)
-			l.Debugf("expected release asset %q", expectedRelease)
-			l.Debugln("considering release", assetName)
-			if strings.HasPrefix(assetName, expectedRelease) {
-				selected = rel
+			for _, expRel := range expectedReleases {
+				if strings.HasPrefix(assetName, expRel) {
+					l.Debugln("selected", rel.Tag)
+					selected = rel
+					break nextAsset
+				}
 			}
 		}
 	}
@@ -176,14 +173,15 @@ func SelectLatestRelease(rels []Release, current string, upgradeToPreReleases bo
 
 // Upgrade to the given release, saving the previous binary with a ".old" extension.
 func upgradeTo(binary string, rel Release) error {
-	expectedRelease := releaseName(rel.Tag)
-	l.Debugf("expected release asset %q", expectedRelease)
+	expectedReleases := releaseNames(rel.Tag)
 	for _, asset := range rel.Assets {
 		assetName := path.Base(asset.Name)
 		l.Debugln("considering release", assetName)
 
-		if strings.HasPrefix(assetName, expectedRelease) {
-			return upgradeToURL(assetName, binary, asset.URL)
+		for _, expRel := range expectedReleases {
+			if strings.HasPrefix(assetName, expRel) {
+				return upgradeToURL(assetName, binary, asset.URL)
+			}
 		}
 	}
 
@@ -204,7 +202,7 @@ func upgradeToURL(archiveName, binary string, url string) error {
 	if err != nil {
 		return err
 	}
-	if os.Rename(fname, binary); err != nil {
+	if err := os.Rename(fname, binary); err != nil {
 		os.Rename(old, binary)
 		return err
 	}
@@ -226,8 +224,8 @@ func readRelease(archiveName, dir, url string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	switch runtime.GOOS {
-	case "windows":
+	switch path.Ext(archiveName) {
+	case ".zip":
 		return readZip(archiveName, dir, io.LimitReader(resp.Body, maxArchiveSize))
 	default:
 		return readTarGz(archiveName, dir, io.LimitReader(resp.Body, maxArchiveSize))
@@ -369,10 +367,10 @@ func archiveFileVisitor(dir string, tempFile *string, signature *[]byte, archive
 
 func verifyUpgrade(archiveName, tempName string, sig []byte) error {
 	if tempName == "" {
-		return fmt.Errorf("no upgrade found")
+		return errors.New("no upgrade found")
 	}
 	if sig == nil {
-		return fmt.Errorf("no signature found")
+		return errors.New("no signature found")
 	}
 
 	l.Debugf("checking signature\n%s", sig)

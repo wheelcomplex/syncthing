@@ -10,6 +10,8 @@ import (
 	"errors"
 	"io/ioutil"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -25,22 +27,22 @@ func TestMtimeFS(t *testing.T) {
 	// a random time with nanosecond precision
 	testTime := time.Unix(1234567890, 123456789)
 
-	mtimefs := NewMtimeFS(DefaultFilesystem, make(mapStore))
+	mtimefs := NewMtimeFS(newBasicFilesystem("."), make(mapStore))
 
 	// Do one Chtimes call that will go through to the normal filesystem
-	osChtimes = os.Chtimes
+	mtimefs.chtimes = os.Chtimes
 	if err := mtimefs.Chtimes("testdata/exists0", testTime, testTime); err != nil {
 		t.Error("Should not have failed:", err)
 	}
 
 	// Do one call that gets an error back from the underlying Chtimes
-	osChtimes = failChtimes
+	mtimefs.chtimes = failChtimes
 	if err := mtimefs.Chtimes("testdata/exists1", testTime, testTime); err != nil {
 		t.Error("Should not have failed:", err)
 	}
 
 	// Do one call that gets struck by an exceptionally evil Chtimes
-	osChtimes = evilChtimes
+	mtimefs.chtimes = evilChtimes
 	if err := mtimefs.Chtimes("testdata/exists2", testTime, testTime); err != nil {
 		t.Error("Should not have failed:", err)
 	}
@@ -80,21 +82,173 @@ func TestMtimeFS(t *testing.T) {
 	}
 }
 
+func TestMtimeFSWalk(t *testing.T) {
+	dir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	underlying := NewFilesystem(FilesystemTypeBasic, dir)
+	mtimefs := NewMtimeFS(underlying, make(mapStore))
+	mtimefs.chtimes = failChtimes
+
+	if err := ioutil.WriteFile(filepath.Join(dir, "file"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStat, err := mtimefs.Lstat("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTime := time.Now().Add(-2 * time.Hour)
+
+	if err := mtimefs.Chtimes("file", newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if newStat, err := mtimefs.Lstat("file"); err != nil {
+		t.Fatal(err)
+	} else if !newStat.ModTime().Equal(newTime) {
+		t.Errorf("expected time %v, lstat time %v", newTime, newStat.ModTime())
+	}
+
+	if underlyingStat, err := underlying.Lstat("file"); err != nil {
+		t.Fatal(err)
+	} else if !underlyingStat.ModTime().Equal(oldStat.ModTime()) {
+		t.Errorf("expected time %v, lstat time %v", oldStat.ModTime(), underlyingStat.ModTime())
+	}
+
+	found := false
+	_ = mtimefs.Walk("", func(path string, info FileInfo, err error) error {
+		if path == "file" {
+			found = true
+			if !info.ModTime().Equal(newTime) {
+				t.Errorf("expected time %v, lstat time %v", newTime, info.ModTime())
+			}
+		}
+		return nil
+	})
+
+	if !found {
+		t.Error("did not find")
+	}
+}
+
+func TestMtimeFSOpen(t *testing.T) {
+	dir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	underlying := NewFilesystem(FilesystemTypeBasic, dir)
+	mtimefs := NewMtimeFS(underlying, make(mapStore))
+	mtimefs.chtimes = failChtimes
+
+	if err := ioutil.WriteFile(filepath.Join(dir, "file"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStat, err := mtimefs.Lstat("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTime := time.Now().Add(-2 * time.Hour)
+
+	if err := mtimefs.Chtimes("file", newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if newStat, err := mtimefs.Lstat("file"); err != nil {
+		t.Fatal(err)
+	} else if !newStat.ModTime().Equal(newTime) {
+		t.Errorf("expected time %v, lstat time %v", newTime, newStat.ModTime())
+	}
+
+	if underlyingStat, err := underlying.Lstat("file"); err != nil {
+		t.Fatal(err)
+	} else if !underlyingStat.ModTime().Equal(oldStat.ModTime()) {
+		t.Errorf("expected time %v, lstat time %v", oldStat.ModTime(), underlyingStat.ModTime())
+	}
+
+	fd, err := mtimefs.Open("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := fd.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(newTime) {
+		t.Errorf("expected time %v, lstat time %v", newTime, info.ModTime())
+	}
+}
+
+func TestMtimeFSInsensitive(t *testing.T) {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		// blatantly assume file systems here are case insensitive. Might be
+		// a spurious failure on oddly configured systems.
+	default:
+		t.Skip("need case insensitive FS")
+	}
+
+	theTest := func(t *testing.T, fs *MtimeFS, shouldSucceed bool) {
+		os.RemoveAll("testdata")
+		defer os.RemoveAll("testdata")
+		os.Mkdir("testdata", 0755)
+		ioutil.WriteFile("testdata/FiLe", []byte("hello"), 0644)
+
+		// a random time with nanosecond precision
+		testTime := time.Unix(1234567890, 123456789)
+
+		// Do one call that gets struck by an exceptionally evil Chtimes, with a
+		// different case from what is on disk.
+		fs.chtimes = evilChtimes
+		if err := fs.Chtimes("testdata/fIlE", testTime, testTime); err != nil {
+			t.Error("Should not have failed:", err)
+		}
+
+		// Check that we get back the mtime we set, if we were supposed to succed.
+		info, err := fs.Lstat("testdata/FILE")
+		if err != nil {
+			t.Error("Lstat shouldn't fail:", err)
+		} else if info.ModTime().Equal(testTime) != shouldSucceed {
+			t.Errorf("Time mismatch; got %v, comparison %v, expected equal=%v", info.ModTime(), testTime, shouldSucceed)
+		}
+	}
+
+	// The test should fail with a case sensitive mtimefs
+	t.Run("with case sensitive mtimefs", func(t *testing.T) {
+		theTest(t, NewMtimeFS(newBasicFilesystem("."), make(mapStore)), false)
+	})
+
+	// And succeed with a case insensitive one.
+	t.Run("with case insensitive mtimefs", func(t *testing.T) {
+		theTest(t, NewMtimeFS(newBasicFilesystem("."), make(mapStore), WithCaseInsensitivity(true)), true)
+	})
+}
+
 // The mapStore is a simple database
 
 type mapStore map[string][]byte
 
-func (s mapStore) PutBytes(key string, data []byte) {
+func (s mapStore) PutBytes(key string, data []byte) error {
 	s[key] = data
+	return nil
 }
 
-func (s mapStore) Bytes(key string) (data []byte, ok bool) {
+func (s mapStore) Bytes(key string) (data []byte, ok bool, err error) {
 	data, ok = s[key]
 	return
 }
 
-func (s mapStore) Delete(key string) {
+func (s mapStore) Delete(key string) error {
 	delete(s, key)
+	return nil
 }
 
 // failChtimes does nothing, and fails

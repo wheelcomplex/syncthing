@@ -15,24 +15,24 @@ type nativeModel struct {
 	Model
 }
 
-func (m nativeModel) Index(deviceID DeviceID, folder string, files []FileInfo) {
+func (m nativeModel) Index(deviceID DeviceID, folder string, files []FileInfo) error {
 	files = fixupFiles(files)
-	m.Model.Index(deviceID, folder, files)
+	return m.Model.Index(deviceID, folder, files)
 }
 
-func (m nativeModel) IndexUpdate(deviceID DeviceID, folder string, files []FileInfo) {
+func (m nativeModel) IndexUpdate(deviceID DeviceID, folder string, files []FileInfo) error {
 	files = fixupFiles(files)
-	m.Model.IndexUpdate(deviceID, folder, files)
+	return m.Model.IndexUpdate(deviceID, folder, files)
 }
 
-func (m nativeModel) Request(deviceID DeviceID, folder string, name string, offset int64, hash []byte, fromTemporary bool, buf []byte) error {
+func (m nativeModel) Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error) {
 	if strings.Contains(name, `\`) {
 		l.Warnf("Dropping request for %s, contains invalid path separator", name)
-		return ErrNoSuchFile
+		return nil, ErrNoSuchFile
 	}
 
 	name = filepath.FromSlash(name)
-	return m.Model.Request(deviceID, folder, name, offset, hash, fromTemporary, buf)
+	return m.Model.Request(deviceID, folder, name, size, offset, hash, weakHash, fromTemporary)
 }
 
 func fixupFiles(files []FileInfo) []FileInfo {

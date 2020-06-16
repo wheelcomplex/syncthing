@@ -104,7 +104,9 @@ func protocolConnectionHandler(tcpConn net.Conn, config *tls.Config) {
 	go messageReader(conn, messages, errors)
 
 	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
 	timeoutTicker := time.NewTimer(networkTimeout)
+	defer timeoutTicker.Stop()
 	joined := false
 
 	for {
@@ -147,7 +149,15 @@ func protocolConnectionHandler(tcpConn net.Conn, config *tls.Config) {
 				protocol.WriteMessage(conn, protocol.ResponseSuccess)
 
 			case protocol.ConnectRequest:
-				requestedPeer := syncthingprotocol.DeviceIDFromBytes(msg.ID)
+				requestedPeer, err := syncthingprotocol.DeviceIDFromBytes(msg.ID)
+				if err != nil {
+					if debug {
+						log.Println(id, "is looking for an invalid peer ID")
+					}
+					protocol.WriteMessage(conn, protocol.ResponseNotFound)
+					conn.Close()
+					continue
+				}
 				outboxesMut.RLock()
 				peerOutbox, ok := outboxes[requestedPeer]
 				outboxesMut.RUnlock()

@@ -7,35 +7,39 @@
 package versioner
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
-	"github.com/syncthing/syncthing/lib/osutil"
+	"github.com/thejerf/suture"
+
+	"github.com/syncthing/syncthing/lib/fs"
+	"github.com/syncthing/syncthing/lib/util"
 )
 
 func init() {
 	// Register the constructor for this type of versioner
-	Factories["trashcan"] = NewTrashcan
+	factories["trashcan"] = newTrashcan
 }
 
-type Trashcan struct {
-	folderPath   string
+type trashcan struct {
+	suture.Service
+	folderFs     fs.Filesystem
+	versionsFs   fs.Filesystem
 	cleanoutDays int
-	stop         chan struct{}
 }
 
-func NewTrashcan(folderID, folderPath string, params map[string]string) Versioner {
+func newTrashcan(folderFs fs.Filesystem, params map[string]string) Versioner {
 	cleanoutDays, _ := strconv.Atoi(params["cleanoutDays"])
 	// On error we default to 0, "do not clean out the trash can"
 
-	s := &Trashcan{
-		folderPath:   folderPath,
+	s := &trashcan{
+		folderFs:     folderFs,
+		versionsFs:   fsFromParams(folderFs, params),
 		cleanoutDays: cleanoutDays,
-		stop:         make(chan struct{}),
 	}
+	s.Service = util.AsService(s.serve, s.String())
 
 	l.Debugf("instantiated %#v", s)
 	return s
@@ -43,58 +47,13 @@ func NewTrashcan(folderID, folderPath string, params map[string]string) Versione
 
 // Archive moves the named file away to a version archive. If this function
 // returns nil, the named file does not exist any more (has been archived).
-func (t *Trashcan) Archive(filePath string) error {
-	info, err := osutil.Lstat(filePath)
-	if os.IsNotExist(err) {
-		l.Debugln("not archiving nonexistent file", filePath)
-		return nil
-	} else if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		panic("bug: attempting to version a symlink")
-	}
-
-	versionsDir := filepath.Join(t.folderPath, ".stversions")
-	if _, err := os.Stat(versionsDir); err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-
-		l.Debugln("creating versions dir", versionsDir)
-		if err := osutil.MkdirAll(versionsDir, 0777); err != nil {
-			return err
-		}
-		osutil.HideFile(versionsDir)
-	}
-
-	l.Debugln("archiving", filePath)
-
-	relativePath, err := filepath.Rel(t.folderPath, filePath)
-	if err != nil {
-		return err
-	}
-
-	archivedPath := filepath.Join(versionsDir, relativePath)
-	if err := osutil.MkdirAll(filepath.Dir(archivedPath), 0777); err != nil && !os.IsExist(err) {
-		return err
-	}
-
-	l.Debugln("moving to", archivedPath)
-
-	if err := osutil.Rename(filePath, archivedPath); err != nil {
-		return err
-	}
-
-	// Set the mtime to the time the file was deleted. This is used by the
-	// cleanout routine. If this fails things won't work optimally but there's
-	// not much we can do about it so we ignore the error.
-	os.Chtimes(archivedPath, time.Now(), time.Now())
-
-	return nil
+func (t *trashcan) Archive(filePath string) error {
+	return archiveFile(t.folderFs, t.versionsFs, filePath, func(name, tag string) string {
+		return name
+	})
 }
 
-func (t *Trashcan) Serve() {
+func (t *trashcan) serve(ctx context.Context) {
 	l.Debugln(t, "starting")
 	defer l.Debugln(t, "stopping")
 
@@ -104,7 +63,7 @@ func (t *Trashcan) Serve() {
 
 	for {
 		select {
-		case <-t.stop:
+		case <-ctx.Done():
 			return
 
 		case <-timer.C:
@@ -120,59 +79,75 @@ func (t *Trashcan) Serve() {
 	}
 }
 
-func (t *Trashcan) Stop() {
-	close(t.stop)
-}
-
-func (t *Trashcan) String() string {
+func (t *trashcan) String() string {
 	return fmt.Sprintf("trashcan@%p", t)
 }
 
-func (t *Trashcan) cleanoutArchive() error {
-	versionsDir := filepath.Join(t.folderPath, ".stversions")
-	if _, err := osutil.Lstat(versionsDir); os.IsNotExist(err) {
+func (t *trashcan) cleanoutArchive() error {
+	if _, err := t.versionsFs.Lstat("."); fs.IsNotExist(err) {
 		return nil
 	}
 
 	cutoff := time.Now().Add(time.Duration(-24*t.cleanoutDays) * time.Hour)
-	currentDir := ""
-	filesInDir := 0
-	walkFn := func(path string, info os.FileInfo, err error) error {
+	dirTracker := make(emptyDirTracker)
+
+	walkFn := func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
-			// We have entered a new directory. Lets check if the previous
-			// directory was empty and try to remove it. We ignore failure for
-			// the time being.
-			if currentDir != "" && filesInDir == 0 {
-				os.Remove(currentDir)
-			}
-			currentDir = path
-			filesInDir = 0
+		if info.IsDir() && !info.IsSymlink() {
+			dirTracker.addDir(path)
 			return nil
 		}
 
 		if info.ModTime().Before(cutoff) {
 			// The file is too old; remove it.
-			os.Remove(path)
+			err = t.versionsFs.Remove(path)
 		} else {
 			// Keep this file, and remember it so we don't unnecessarily try
 			// to remove this directory.
-			filesInDir++
+			dirTracker.addFile(path)
 		}
-		return nil
-	}
-
-	if err := filepath.Walk(versionsDir, walkFn); err != nil {
 		return err
 	}
 
-	// The last directory seen by the walkFn may not have been removed as it
-	// should be.
-	if currentDir != "" && filesInDir == 0 {
-		os.Remove(currentDir)
+	if err := t.versionsFs.Walk(".", walkFn); err != nil {
+		return err
 	}
+
+	dirTracker.deleteEmptyDirs(t.versionsFs)
+
 	return nil
+}
+
+func (t *trashcan) GetVersions() (map[string][]FileVersion, error) {
+	return retrieveVersions(t.versionsFs)
+}
+
+func (t *trashcan) Restore(filepath string, versionTime time.Time) error {
+	// If we have an untagged file A and want to restore it on top of existing file A, we can't first archive the
+	// existing A as we'd overwrite the old A version, therefore when we archive existing file, we archive it with a
+	// tag but when the restoration is finished, we rename it (untag it). This is only important if when restoring A,
+	// there already exists a file at the same location
+
+	taggedName := ""
+	tagger := func(name, tag string) string {
+		// We also abuse the fact that tagger gets called twice, once for tagging the restoration version, which
+		// should just return the plain name, and second time by archive which archives existing file in the folder.
+		// We can't use TagFilename here, as restoreFile would discover that as a valid version and restore that instead.
+		if taggedName != "" {
+			return taggedName
+		}
+
+		taggedName = fs.TempName(name)
+		return name
+	}
+
+	err := restoreFile(t.versionsFs, t.folderFs, filepath, versionTime, tagger)
+	if taggedName == "" {
+		return err
+	}
+
+	return t.versionsFs.Rename(taggedName, filepath)
 }

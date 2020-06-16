@@ -1,4 +1,4 @@
-<configuration version="14">
+<configuration version="31">
     <options>
         <listenAddress>tcp://:23000</listenAddress>
         <allowDelete>false</allowDelete>
@@ -27,23 +27,22 @@
         <symlinksEnabled>false</symlinksEnabled>
         <limitBandwidthInLan>true</limitBandwidthInLan>
         <databaseBlockCacheMiB>42</databaseBlockCacheMiB>
-        <minHomeDiskFreePct>5.2</minHomeDiskFreePct>
+        <minHomeDiskFree unit="%">5.2</minHomeDiskFree>
         <urURL>https://localhost/newdata</urURL>
+        <urSeen>8</urSeen>
+        <urAccepted>4</urAccepted>
         <urInitialDelayS>800</urInitialDelayS>
         <urPostInsecurely>true</urPostInsecurely>
         <releasesURL>https://localhost/releases</releasesURL>
         <overwriteRemoteDeviceNamesOnConnect>true</overwriteRemoteDeviceNamesOnConnect>
         <tempIndexMinBlocks>100</tempIndexMinBlocks>
-        <weakHashSelectionMethod>never</weakHashSelectionMethod>
-        <stunKeepaliveSeconds>10</stunKeepaliveSeconds>
-        <stunServer>a.stun.com</stunServer>
-        <stunServer>b.stun.com</stunServer>
-        <defaultKCPEnabled>true</defaultKCPEnabled>
-        <kcpCongestionControl>false</kcpCongestionControl>
-        <kcpReceiveWindowSize>1280</kcpReceiveWindowSize>
-        <kcpSendWindowSize>1280</kcpSendWindowSize>
-        <kcpUpdateIntervalMs>1000</kcpUpdateIntervalMs>
-        <kcpFastResend>true</kcpFastResend>
         <defaultFolderPath>/media/syncthing</defaultFolderPath>
+        <setLowPriority>false</setLowPriority>
+        <crashReportingURL>https://localhost/newcrash</crashReportingURL>
+        <crashReportingEnabled>false</crashReportingEnabled>
+        <stunKeepaliveStartS>9000</stunKeepaliveStartS>
+        <stunKeepaliveMinS>900</stunKeepaliveMinS>
+        <stunServer>foo</stunServer>
+        <unackedNotificationID>asdfasdf</unackedNotificationID>
     </options>
 </configuration>

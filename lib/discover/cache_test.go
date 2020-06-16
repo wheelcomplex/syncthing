@@ -7,6 +7,7 @@
 package discover
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -15,32 +16,33 @@ import (
 )
 
 func TestCacheUnique(t *testing.T) {
-	addresses0 := []string{"tcp://192.0.2.44:22000", "tcp://192.0.2.42:22000"} // prio 0
-	addresses1 := []string{"tcp://192.0.2.43:22000", "tcp://192.0.2.42:22000"} // prio 1
+	addresses0 := []string{"tcp://192.0.2.44:22000", "tcp://192.0.2.42:22000"}
+	addresses1 := []string{"tcp://192.0.2.43:22000", "tcp://192.0.2.42:22000"}
 
 	// what we expect from just addresses0
 	addresses0Sorted := []string{"tcp://192.0.2.42:22000", "tcp://192.0.2.44:22000"}
 
 	// what we expect from addresses0+addresses1
 	totalSorted := []string{
-		// first prio 0, sorted
-		"tcp://192.0.2.42:22000", "tcp://192.0.2.44:22000",
-		// then prio 1
-		"tcp://192.0.2.43:22000",
+		"tcp://192.0.2.42:22000",
 		// no duplicate .42
+		"tcp://192.0.2.43:22000",
+		"tcp://192.0.2.44:22000",
 	}
 
 	c := NewCachingMux()
 	c.(*cachingMux).ServeBackground()
 	defer c.Stop()
 
-	// Add a fake discovery service and verify we get it's answers through the
+	// Add a fake discovery service and verify we get its answers through the
 	// cache.
 
 	f1 := &fakeDiscovery{addresses0}
-	c.Add(f1, time.Minute, 0, 0)
+	c.Add(f1, time.Minute, 0)
 
-	addr, err := c.Lookup(protocol.LocalDeviceID)
+	ctx := context.Background()
+
+	addr, err := c.Lookup(ctx, protocol.LocalDeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,9 +54,9 @@ func TestCacheUnique(t *testing.T) {
 	// duplicate or otherwise mess up the responses now.
 
 	f2 := &fakeDiscovery{addresses1}
-	c.Add(f2, time.Minute, 0, 1)
+	c.Add(f2, time.Minute, 0)
 
-	addr, err = c.Lookup(protocol.LocalDeviceID)
+	addr, err = c.Lookup(ctx, protocol.LocalDeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +69,7 @@ type fakeDiscovery struct {
 	addresses []string
 }
 
-func (f *fakeDiscovery) Lookup(deviceID protocol.DeviceID) (addresses []string, err error) {
+func (f *fakeDiscovery) Lookup(_ context.Context, deviceID protocol.DeviceID) (addresses []string, err error) {
 	return f.addresses, nil
 }
 
@@ -92,12 +94,12 @@ func TestCacheSlowLookup(t *testing.T) {
 
 	started := make(chan struct{})
 	f1 := &slowDiscovery{time.Second, started}
-	c.Add(f1, time.Minute, 0, 0)
+	c.Add(f1, time.Minute, 0)
 
 	// Start a lookup, which will take at least a second
 
 	t0 := time.Now()
-	go c.Lookup(protocol.LocalDeviceID)
+	go c.Lookup(context.Background(), protocol.LocalDeviceID)
 	<-started // The slow lookup method has been called so we're inside the lock
 
 	// It should be possible to get ChildErrors while it's running
@@ -117,7 +119,7 @@ type slowDiscovery struct {
 	started chan struct{}
 }
 
-func (f *slowDiscovery) Lookup(deviceID protocol.DeviceID) (addresses []string, err error) {
+func (f *slowDiscovery) Lookup(_ context.Context, deviceID protocol.DeviceID) (addresses []string, err error) {
 	close(f.started)
 	time.Sleep(f.delay)
 	return nil, nil

@@ -14,12 +14,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/build"
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/relay/protocol"
 	"github.com/syncthing/syncthing/lib/tlsutil"
@@ -34,24 +35,6 @@ import (
 )
 
 var (
-	Version    string
-	BuildStamp string
-	BuildUser  string
-	BuildHost  string
-
-	BuildDate   time.Time
-	LongVersion string
-)
-
-func init() {
-	stamp, _ := strconv.Atoi(BuildStamp)
-	BuildDate = time.Unix(int64(stamp), 0)
-
-	date := BuildDate.UTC().Format("2006-01-02 15:04:05 MST")
-	LongVersion = fmt.Sprintf(`strelaysrv %s (%s %s-%s) %s@%s %s`, Version, runtime.Version(), runtime.GOOS, runtime.GOARCH, BuildUser, BuildHost, date)
-}
-
-var (
 	listen string
 	debug  bool
 
@@ -64,12 +47,13 @@ var (
 
 	limitCheckTimer *time.Timer
 
-	sessionLimitBps int
-	globalLimitBps  int
-	overLimit       int32
-	descriptorLimit int64
-	sessionLimiter  *rate.Limiter
-	globalLimiter   *rate.Limiter
+	sessionLimitBps   int
+	globalLimitBps    int
+	overLimit         int32
+	descriptorLimit   int64
+	sessionLimiter    *rate.Limiter
+	globalLimiter     *rate.Limiter
+	networkBufferSize int
 
 	statusAddr       string
 	poolAddrs        string
@@ -81,7 +65,15 @@ var (
 	natLease   int
 	natRenewal int
 	natTimeout int
+
+	pprofEnabled bool
 )
+
+// httpClient is the HTTP client we use for outbound requests. It has a
+// timeout and may get further options set during initialization.
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
 
 func main() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
@@ -105,7 +97,16 @@ func main() {
 	flag.IntVar(&natLease, "nat-lease", 60, "NAT lease length in minutes")
 	flag.IntVar(&natRenewal, "nat-renewal", 30, "NAT renewal frequency in minutes")
 	flag.IntVar(&natTimeout, "nat-timeout", 10, "NAT discovery timeout in seconds")
+	flag.BoolVar(&pprofEnabled, "pprof", false, "Enable the built in profiling on the status server")
+	flag.IntVar(&networkBufferSize, "network-buffer", 2048, "Network buffer size (two of these per proxied connection)")
+	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
+
+	longVer := build.LongVersionFor("strelaysrv")
+	if *showVersion {
+		fmt.Println(longVer)
+		return
+	}
 
 	if extAddress == "" {
 		extAddress = listen
@@ -124,18 +125,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if laddr.IP != nil && !laddr.IP.IsUnspecified() {
+		// We bind to a specific address. Our outgoing HTTP requests should
+		// also come from that address.
 		laddr.Port = 0
-		transport, ok := http.DefaultTransport.(*http.Transport)
-		if ok {
-			transport.Dial = (&net.Dialer{
-				Timeout:   30 * time.Second,
-				LocalAddr: laddr,
-			}).Dial
+		boundDialer := &net.Dialer{LocalAddr: laddr}
+		httpClient.Transport = &http.Transport{
+			DialContext: boundDialer.DialContext,
 		}
 	}
 
-	log.Println(LongVersion)
+	log.Println(longVer)
 
 	maxDescriptors, err := osutil.MaximizeOpenFileLimit()
 	if maxDescriptors > 0 {
@@ -155,7 +156,7 @@ func main() {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		log.Println("Failed to load keypair. Generating one, this might take a while...")
-		cert, err = tlsutil.NewCertificate(certFile, keyFile, "strelaysrv", 3072)
+		cert, err = tlsutil.NewCertificate(certFile, keyFile, "strelaysrv", 20*365)
 		if err != nil {
 			log.Fatalln("Failed to generate X509 key pair:", err)
 		}
@@ -183,7 +184,7 @@ func main() {
 		log.Println("ID:", id)
 	}
 
-	wrapper := config.Wrap("config", config.New(id))
+	wrapper := config.Wrap("config", config.New(id), events.NoopLogger)
 	wrapper.SetOptions(config.OptionsConfiguration{
 		NATLeaseM:   natLease,
 		NATRenewalM: natRenewal,

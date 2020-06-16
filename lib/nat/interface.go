@@ -7,6 +7,7 @@
 package nat
 
 import (
+	"context"
 	"net"
 	"time"
 )
@@ -15,12 +16,12 @@ type Protocol string
 
 const (
 	TCP Protocol = "TCP"
-	UDP          = "UDP"
+	UDP Protocol = "UDP"
 )
 
 type Device interface {
 	ID() string
 	GetLocalIPAddress() net.IP
-	AddPortMapping(protocol Protocol, internalPort, externalPort int, description string, duration time.Duration) (int, error)
-	GetExternalIPAddress() (net.IP, error)
+	AddPortMapping(ctx context.Context, protocol Protocol, internalPort, externalPort int, description string, duration time.Duration) (int, error)
+	GetExternalIPAddress(ctx context.Context) (net.IP, error)
 }

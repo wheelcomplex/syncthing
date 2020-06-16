@@ -32,15 +32,19 @@ var (
 )
 
 const authorsHeader = `# This is the official list of Syncthing authors for copyright purposes.
-# The format is:
+#
+# THIS FILE IS MOSTLY AUTO GENERATED. IF YOU'VE MADE A COMMIT TO THE
+# REPOSITORY YOU WILL BE ADDED HERE AUTOMATICALLY WITHOUT THE NEED FOR
+# ANY MANUAL ACTION.
+#
+# That said, you are welcome to correct your name or add a nickname / GitHub
+# user name as appropriate. The format is:
 #
 #    Name Name Name (nickname) <email1@example.com> <email2@example.com>
 #
-# The NICKS list is auto generated from this file.
-`
-
-const nicksHeader = `# This file maps email addresses used in commits to nicks used the changelog.
-# It is auto generated from the AUTHORS file by script/authors.go.
+# The in-GUI authors list is periodically automatically updated from the
+# contents of this file.
+#
 `
 
 type author struct {
@@ -52,7 +56,44 @@ type author struct {
 }
 
 func main() {
+	// Read authors from the AUTHORS file
 	authors := getAuthors()
+
+	// Grab the set of thus known email addresses
+	listed := make(stringSet)
+	names := make(map[string]int)
+	for i, a := range authors {
+		names[a.name] = i
+		for _, e := range a.emails {
+			listed.add(e)
+		}
+	}
+
+	// Grab the set of all known authors based on the git log, and add any
+	// missing ones to the authors list.
+	all := allAuthors()
+	for email, name := range all {
+		if listed.has(email) {
+			continue
+		}
+
+		if _, ok := names[name]; ok && name != "" {
+			// We found a match on name
+			authors[names[name]].emails = append(authors[names[name]].emails, email)
+			listed.add(email)
+			continue
+		}
+
+		authors = append(authors, author{
+			name:   name,
+			emails: []string{email},
+		})
+		names[name] = len(authors) - 1
+		listed.add(email)
+	}
+
+	// Write author names in GUI about modal
+
 	getContributions(authors)
 	sort.Sort(byContributions(authors))
 
@@ -78,6 +119,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	fmt.Fprintf(out, "%s\n", authorsHeader)
 	for _, author := range authors {
 		fmt.Fprintf(out, "%s", author.name)
@@ -88,25 +130,6 @@ func main() {
 			fmt.Fprintf(out, " <%s>", email)
 		}
 		fmt.Fprintf(out, "\n")
-	}
-	out.Close()
-
-	// Write NICKS file
-
-	sort.Sort(byNick(authors))
-
-	out, err = os.Create("NICKS")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Fprintf(out, "%s\n", nicksHeader)
-	for _, author := range authors {
-		if author.nickname == "" {
-			continue
-		}
-		for _, email := range author.emails {
-			fmt.Fprintf(out, "%s <%s>\n", author.nickname, email)
-		}
 	}
 	out.Close()
 }
@@ -184,6 +207,49 @@ next:
 	}
 }
 
+// list of commits that we don't include in our author file; because they
+// are legacy things that don't affect code, are committed with incorrect
+// address, or for other reasons.
+var excludeCommits = stringSetFromStrings([]string{
+	"a9339d0627fff439879d157c75077f02c9fac61b",
+	"254c63763a3ad42fd82259f1767db526cff94a14",
+	"32a76901a91ff0f663db6f0830e0aedec946e4d0",
+	"bc7639b0ffcea52b2197efb1c0bb68b338d1c915",
+	"9bdcadf6345aba3a939e9e58d85b89dbe9d44bc9",
+	"b933e9666abdfcd22919dd458c930d944e1e1b7f",
+	"b84d960a81c1282a79e2b9477558de4f1af6faae",
+})
+
+// allAuthors returns the set of authors in the git commit log, except those
+// in excluded commits.
+func allAuthors() map[string]string {
+	args := append([]string{"log", "--format=%H %ae %an"})
+	cmd := exec.Command("git", args...)
+	bs, err := cmd.Output()
+	if err != nil {
+		log.Fatal("git:", err)
+	}
+
+	names := make(map[string]string)
+	for _, line := range bytes.Split(bs, []byte{'\n'}) {
+		fields := strings.SplitN(string(line), " ", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		hash, email, name := fields[0], fields[1], fields[2]
+
+		if excludeCommits.has(hash) {
+			continue
+		}
+
+		if names[email] == "" {
+			names[email] = name
+		}
+	}
+
+	return names
+}
+
 type byContributions []author
 
 func (l byContributions) Len() int { return len(l) }
@@ -212,14 +278,33 @@ func (l byName) Less(a, b int) bool {
 
 func (l byName) Swap(a, b int) { l[a], l[b] = l[b], l[a] }
 
-type byNick []author
+// A simple string set type
 
-func (l byNick) Len() int { return len(l) }
+type stringSet map[string]struct{}
 
-func (l byNick) Less(a, b int) bool {
-	anick := strings.ToLower(l[a].nickname)
-	bnick := strings.ToLower(l[b].nickname)
-	return anick < bnick
+func stringSetFromStrings(ss []string) stringSet {
+	s := make(stringSet)
+	for _, e := range ss {
+		s.add(e)
+	}
+	return s
 }
 
-func (l byNick) Swap(a, b int) { l[a], l[b] = l[b], l[a] }
+func (s stringSet) add(e string) {
+	s[e] = struct{}{}
+}
+
+func (s stringSet) has(e string) bool {
+	_, ok := s[e]
+	return ok
+}
+
+func (s stringSet) except(other stringSet) stringSet {
+	diff := make(stringSet)
+	for e := range s {
+		if !other.has(e) {
+			diff.add(e)
+		}
+	}
+	return diff
+}

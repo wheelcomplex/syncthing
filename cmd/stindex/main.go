@@ -13,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/syncthing/syncthing/lib/db"
+	"github.com/syncthing/syncthing/lib/db/backend"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(os.Stdout)
 
-	flag.StringVar(&mode, "mode", "dump", "Mode of operation: dump, dumpsize")
+	flag.StringVar(&mode, "mode", "dump", "Mode of operation: dump, dumpsize, idxck")
 
 	flag.Parse()
 
@@ -30,18 +30,34 @@ func main() {
 		path = filepath.Join(defaultConfigDir(), "index-v0.14.0.db")
 	}
 
-	fmt.Println("Path:", path)
-
-	ldb, err := db.Open(path)
+	var ldb backend.Backend
+	var err error
+	if looksLikeBadger(path) {
+		ldb, err = backend.OpenBadger(path)
+	} else {
+		ldb, err = backend.OpenLevelDBRO(path)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if mode == "dump" {
+	switch mode {
+	case "dump":
 		dump(ldb)
-	} else if mode == "dumpsize" {
+	case "dumpsize":
 		dumpsize(ldb)
-	} else {
+	case "idxck":
+		if !idxck(ldb) {
+			os.Exit(1)
+		}
+	case "account":
+		account(ldb)
+	default:
 		fmt.Println("Unknown mode")
 	}
+}
+
+func looksLikeBadger(path string) bool {
+	_, err := os.Stat(filepath.Join(path, "KEYREGISTRY"))
+	return err == nil
 }

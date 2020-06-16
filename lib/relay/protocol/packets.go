@@ -1,6 +1,6 @@
 // Copyright (C) 2015 Audrius Butkevicius and Contributors (see the CONTRIBUTORS file).
 
-//go:generate -command genxdr go run ../../../vendor/github.com/calmh/xdr/cmd/genxdr/main.go
+//go:generate -command genxdr go run ../../../repos/xdr/cmd/genxdr/main.go
 //go:generate genxdr -o packets_xdr.go packets.go
 
 package protocol
@@ -56,7 +56,11 @@ type SessionInvitation struct {
 }
 
 func (i SessionInvitation) String() string {
-	return fmt.Sprintf("%s@%s", syncthingprotocol.DeviceIDFromBytes(i.From), i.AddressString())
+	device := "<invalid>"
+	if address, err := syncthingprotocol.DeviceIDFromBytes(i.From); err == nil {
+		device = address.String()
+	}
+	return fmt.Sprintf("%s@%s", device, i.AddressString())
 }
 
 func (i SessionInvitation) GoString() string {
